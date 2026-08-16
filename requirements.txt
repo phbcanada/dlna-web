@@ -1,0 +1,6 @@
+Flask>=3.0
+requests>=2.31
+
+# Production WSGI server for the systemd deployment (see dlna-web.service).
+# Pure Python, no compiled dependencies -- installs cleanly on a Raspberry Pi.
+waitress>=3.0

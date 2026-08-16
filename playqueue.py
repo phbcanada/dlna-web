@@ -1,0 +1,508 @@
+# Copyright (c) 2026 Paul H. Breslin
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# --------------------------------------------------------------------------
+# Web-service refactor notes:
+#   * print()s replaced with logging (this module was already headless,
+#     so this is a mechanical change).
+#   * Every mutation (add/next/prev/clear/play/stop) now publishes a
+#     "queue_status" event, and playback attempts publish "now_playing",
+#     so a browser tab's queue panel updates live without polling.
+#   * Added snapshot() (JSON-safe queue dump) and play_at(index) for the
+#     web API -- clicking a track in the queue panel jumps straight to it.
+#   * Renderer commands already return True/False (see dlnarenderer.py);
+#     this module now surfaces failures as warnings + events instead of
+#     silently trusting they worked, since the renderer being off is an
+#     expected state, not a bug.
+# --------------------------------------------------------------------------
+import threading
+import time
+import os
+import logging
+
+import requests
+import socket
+import xml.etree.ElementTree as ET
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from events import events
+
+logger = logging.getLogger("playqueue")
+gena_logger = logging.getLogger("playqueue.gena")
+
+
+# This handles the inbound network traffic from the device
+class GENAEventHTTPHandler(BaseHTTPRequestHandler):
+    def do_NOTIFY(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > 0:
+            payload = self.rfile.read(content_length).decode('utf-8')
+            if "LastChange" in payload:
+                self.process_transport_event(payload)
+
+        # Always return HTTP 200 OK to acknowledge the event receipt
+        self.send_response(200)
+        self.end_headers()
+
+    def process_transport_event(self, xml_payload):
+        try:
+            if isinstance(xml_payload, bytes):
+                xml_payload = xml_payload.decode('utf-8', errors='ignore')
+
+            sanitized_xml = xml_payload.replace("& ", "&amp; ")
+
+            root = ET.fromstring(sanitized_xml)
+            for item in root.iter():
+                if 'LastChange' in item.tag:
+                    inner_xml = item.text
+                    if not inner_xml:
+                        continue
+
+                    sanitized_inner = inner_xml.replace("& ", "&amp; ")
+                    try:
+                        inner_root = ET.fromstring(sanitized_inner)
+                    except ET.ParseError:
+                        import re
+                        state_match = re.search(r'TransportState\s+val="([^"]+)"', inner_xml)
+                        if state_match:
+                            class DummyNode:
+                                tag = 'TransportState'
+                                attrib = {'val': state_match.group(1)}
+                            inner_root = [DummyNode()]
+                        else:
+                            continue
+
+                    for state_node in inner_root.iter():
+                        if 'TransportState' in state_node.tag:
+                            state = state_node.attrib.get('val', '')
+                            play_queue = self.server.play_queue
+
+                            with play_queue.state_lock:
+                                current_was_playing = play_queue.was_playing
+
+                                gena_logger.debug(
+                                    f"Device broadcast: {state} (was_playing={current_was_playing})"
+                                )
+
+                                if state in ("PLAYING", "TRANSITIONING"):
+                                    play_queue.was_playing = True
+
+                                elif state in ("STOPPED", "NO_MEDIA_PRESENT", "PAUSED_PLAYBACK"):
+                                    if current_was_playing and state != "PAUSED_PLAYBACK":
+                                        play_queue.was_playing = False
+                                        gena_logger.info("Track ended -- advancing queue.")
+                                        play_queue.next()
+
+        except Exception as e:
+            gena_logger.warning(f"GENA event parsing error: {e}")
+
+    def log_message(self, format, *args):
+        # Silence BaseHTTPRequestHandler's default access-log-to-stderr; we
+        # log meaningfully above instead.
+        pass
+
+
+class PlayQueue:
+    def __init__(self, renderer, *args, **kwargs):
+        self.renderer = renderer
+        self.queue = []            # List of dicts: [{'title': x, 'uri': y, 'mime': z}]
+        self.current_idx = -1
+
+        # RLock, not Lock: several methods (clear(), next() at end-of-queue)
+        # call self.stop() while already holding self.lock, and stop() in
+        # turn publishes a snapshot that also needs self.lock. A plain Lock
+        # would deadlock on that re-entry from the same thread.
+        self.lock = threading.RLock()
+        self.running = True
+        self.state_lock = threading.Lock()
+        self.was_playing = False
+
+        # =====================================================================
+        # EXPERIMENTAL TOGGLE: Set to True to override monitor loop with GENA
+        # =====================================================================
+        self.use_gena = True
+
+    # ------------------------------------------------------------------
+    # Web-facing helpers
+    # ------------------------------------------------------------------
+
+    def snapshot(self):
+        """JSON-safe dump of queue contents + position, for the REST API
+        and for event payloads."""
+        with self.lock:
+            return {
+                "queue": [
+                    {"title": t.get("title"), "uri": t.get("uri")}
+                    for t in self.queue
+                ],
+                "current_idx": self.current_idx,
+            }
+
+    def _publish_queue_status(self):
+        events.publish("queue_status", self.snapshot())
+
+    def play_at(self, index):
+        """Jumps directly to a specific queue position and plays it --
+        used when the user clicks a track in the queue panel."""
+        ok = False
+        with self.lock:
+            if 0 <= index < len(self.queue):
+                self.current_idx = index
+                self._play_current()
+                ok = True
+        self._publish_queue_status()
+        return ok
+
+    # ------------------------------------------------------------------
+    # GENA subscription plumbing
+    # ------------------------------------------------------------------
+
+    def _get_local_ip(self):
+        """Forces finding the real local IP interface facing the renderer."""
+        try:
+            from urllib.parse import urlparse
+
+            event_url = getattr(self.renderer, 'avtransport_event_url', "")
+            if event_url:
+                target_host = urlparse(event_url).hostname
+            else:
+                target_host = self.renderer.host
+
+            if not target_host or target_host.lower() == "unknown":
+                return "0.0.0.0"
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((target_host, 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except Exception as e:
+            logger.debug(f"Auto-IP detection failed: {e}")
+            return "0.0.0.0"
+
+    def _start_gena_listener(self):
+        """Spins up the HTTP backend and sends the SUBSCRIBE packet safely."""
+        local_ip = self._get_local_ip()
+        local_port = 8089  # Choose any open port on your system
+
+        logger.info(f"Local GENA listener binding to: http://{local_ip}:{local_port}")
+        if local_ip in ["0.0.0.0", "127.0.0.1"]:
+            logger.warning("Local IP resolved to loopback -- renderer won't be able to route events back here.")
+
+        def run_server():
+            try:
+                server = HTTPServer((local_ip, local_port), GENAEventHTTPHandler)
+                server.play_queue = self
+                server.serve_forever()
+            except Exception as e:
+                logger.warning(f"GENA background server failed to start: {e}. Falling back to polling.")
+                self._start_local_monitor_thread()
+
+        threading.Thread(target=run_server, daemon=True).start()
+
+        def send_subscribe():
+            event_url = getattr(self.renderer, 'avtransport_event_url', None)
+            if not event_url:
+                self._start_local_monitor_thread()
+                return
+
+            headers = {
+                "HOST": event_url.split("://")[1].split("/")[0],
+                "TIMEOUT": "Second-300"
+            }
+
+            current_sid = getattr(self, 'gena_sid', None)
+
+            if current_sid:
+                headers["SID"] = current_sid
+                logger.debug(f"Renewing GENA subscription lease for SID: {current_sid}")
+            else:
+                headers["CALLBACK"] = f"<http://{local_ip}:{local_port}/>"
+                headers["NT"] = "upnp:event"
+                logger.info(f"Sending initial SUBSCRIBE to: {event_url}")
+
+            try:
+                res = requests.request("SUBSCRIBE", event_url, headers=headers, timeout=5)
+
+                if res.status_code == 200:
+                    if not current_sid:
+                        self.gena_sid = res.headers.get('SID')
+                        logger.info(f"GENA subscription active. SID: {self.gena_sid}")
+                    else:
+                        logger.debug("GENA subscription lease renewed.")
+
+                    if getattr(self, 'use_gena', True):
+                        self.renewal_timer = threading.Timer(150.0, send_subscribe)
+                        self.renewal_timer.daemon = True
+                        self.renewal_timer.start()
+                else:
+                    logger.warning(f"GENA subscribe rejected ({res.status_code}). Falling back to polling.")
+                    self._start_local_monitor_thread()
+
+            except Exception as e:
+                logger.info(f"GENA handshake failed ({e}) -- renderer likely offline or doesn't support "
+                            f"eventing. Falling back to polling.")
+                self._start_local_monitor_thread()
+
+        # A short delay guarantees the HTTP server thread above is fully
+        # listening before we try to subscribe.
+        threading.Timer(1.0, send_subscribe).start()
+
+    def _start_local_monitor_thread(self):
+        """Background SOAP-polling fallback for renderers that reject GENA."""
+        logger.info("Launching background polling monitor thread.")
+        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.monitor_thread.start()
+
+    def save_playlist(self, playlist_name):
+        """Generates a local server-compatible M3U file from the current queue tracks."""
+        if not playlist_name:
+            playlist_name = "my_playlist"
+
+        save_dir = os.path.expanduser("~/.playlists")
+        os.makedirs(save_dir, exist_ok=True)
+        filepath = os.path.join(save_dir, f"{playlist_name}.m3u")
+
+        try:
+            with self.lock:
+                tracks_snapshot = list(self.queue)
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("#EXTM3U\n")
+                for track in tracks_snapshot:
+                    rel_path = track.get('relative_path')
+                    uri = track.get('uri')
+                    if rel_path and uri:
+                        f.write(f"#EXTINF:-1,{track['title']}\n")
+                        f.write(f"#URI:{uri}\n")
+                        f.write(f"{rel_path}\n")
+
+            logger.info(f"Playlist '{playlist_name}' saved to {filepath}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to save playlist '{playlist_name}': {e}")
+            return False
+
+    def load_playlist(self, playlist_name):
+        """Loads and appends tracks from a local M3U file back into the active play queue."""
+        save_dir = os.path.expanduser("~/.playlists")
+        filepath = os.path.join(save_dir, f"{playlist_name}.m3u")
+
+        if not os.path.exists(filepath):
+            logger.warning(f"Playlist file not found: {filepath}")
+            return False
+
+        try:
+            new_tracks = []
+            current_title = "Unknown Track"
+            current_uri = None
+
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#EXTM3U"):
+                        continue
+
+                    if line.startswith("#EXTINF:"):
+                        parts = line.split(",", 1)
+                        if len(parts) > 1:
+                            current_title = parts[1]
+                    elif line.startswith("#URI:"):
+                        current_uri = line[5:].strip()
+                    elif not line.startswith("#"):
+                        uri = current_uri if current_uri else (line if line.startswith("http") else "")
+                        if uri:
+                            new_tracks.append({
+                                'title': current_title,
+                                'uri': uri,
+                                'relative_path': line
+                            })
+                        current_title = "Unknown Track"
+                        current_uri = None
+
+            if new_tracks:
+                with self.lock:
+                    initial_empty = len(self.queue) == 0
+                    self.queue.extend(new_tracks)
+                    if initial_empty and self.current_idx == -1:
+                        self.current_idx = 0
+                logger.info(f"Loaded {len(new_tracks)} tracks from playlist '{playlist_name}'.")
+                self._publish_queue_status()
+                return True
+
+            logger.warning(f"No valid streaming tracks found in playlist '{playlist_name}'.")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to load playlist '{playlist_name}': {e}")
+            return False
+
+    def add_to_queue(self, track_item):
+        with self.lock:
+            self.queue.append(track_item)
+            logger.info(f"Queued: {track_item['title']}")
+            if self.current_idx == -1:
+                self.current_idx = 0
+        self._publish_queue_status()
+
+    def play_now(self, track_item):
+        with self.lock:
+            insert_pos = self.current_idx + 1 if self.current_idx != -1 else 0
+            self.queue.insert(insert_pos, track_item)
+            self.current_idx = insert_pos
+            self._play_current()
+        self._publish_queue_status()
+
+    def play(self):
+        with self.lock:
+            if not self.queue:
+                logger.info("Play requested but queue is empty.")
+                return
+            if self.current_idx == -1:
+                self.current_idx = 0
+            self._play_current()
+        self._publish_queue_status()
+
+    def pause(self):
+        ok = self.renderer.pause()
+        if not ok:
+            logger.warning("Pause command failed -- renderer may be offline.")
+        return ok
+
+    def toggle_play(self):
+        """Toggles between play and pause depending on the renderer's active state."""
+        try:
+            state = self.renderer.get_transport_state()
+        except Exception:
+            state = "STOPPED"
+
+        if state in ("PLAYING", "TRANSITIONING"):
+            logger.info("Toggling: pausing playback.")
+            self.pause()
+        elif state == "UNKNOWN":
+            logger.warning("Cannot toggle playback -- renderer is not responding.")
+        else:
+            logger.info("Toggling: resuming/starting playback.")
+            self.play()
+
+    def stop(self):
+        self.was_playing = False
+        ok = self.renderer.stop()
+        if not ok:
+            logger.debug("Stop command did not reach renderer (likely already offline).")
+        self._publish_queue_status()
+        return ok
+
+    def next(self):
+        with self.lock:
+            if self.current_idx + 1 < len(self.queue):
+                self.current_idx += 1
+                self._play_current()
+            else:
+                logger.info("End of play queue reached.")
+                self.stop()
+        self._publish_queue_status()
+
+    def prev(self):
+        with self.lock:
+            if self.current_idx > 0:
+                self.current_idx -= 1
+                self._play_current()
+            else:
+                logger.info("Already at the first track.")
+        self._publish_queue_status()
+
+    def clear(self):
+        with self.lock:
+            self.stop()
+            self.queue.clear()
+            self.current_idx = -1
+            logger.info("Queue cleared.")
+        self._publish_queue_status()
+
+    def get_current_track(self):
+        with self.lock:
+            if 0 <= self.current_idx < len(self.queue):
+                return self.queue[self.current_idx]
+            return None
+
+    def display_queue(self):
+        """CLI-only pretty-printer."""
+        with self.lock:
+            print("\n" + "=" * 50)
+            print(" 🎶 CURRENT PLAY QUEUE:")
+            print("=" * 50)
+            if not self.queue:
+                print("   (Queue is empty)")
+            else:
+                for idx, track in enumerate(self.queue):
+                    prefix = "➔ ▶ " if idx == self.current_idx else "    "
+                    print(f"{prefix}{idx + 1}. {track['title']}")
+            print("=" * 50)
+
+    def _play_current(self):
+        """Caller must already hold self.lock."""
+        if 0 <= self.current_idx < len(self.queue):
+            track = self.queue[self.current_idx]
+            self.was_playing = False
+
+            ok = self.renderer.play_uri(track['uri'], track['title'])
+            if ok:
+                self.was_playing = True
+                logger.info(f"Now playing: {track['title']}")
+            else:
+                logger.warning(
+                    f"Could not start playback for '{track['title']}' -- "
+                    f"renderer '{self.renderer.friendly_name}' may be offline."
+                )
+            events.publish("now_playing", {"title": track['title'], "ok": ok})
+
+    def _monitor_loop(self):
+        """Background thread loop verifying track status every second.
+        Tolerant of a renderer that is intermittently or permanently
+        unreachable -- it just keeps polling quietly rather than crashing
+        the thread, since "renderer is off right now" is a normal state
+        for a device that isn't always on."""
+        while self.running:
+            try:
+                if self.renderer.control_url:
+                    state = self.renderer.get_transport_state()
+
+                    if state in ("PLAYING", "TRANSITIONING"):
+                        self.was_playing = True
+                    elif state in ("STOPPED", "NO_MEDIA_PRESENT", "PAUSED_PLAYBACK"):
+                        if self.was_playing and state != "PAUSED_PLAYBACK":
+                            self.was_playing = False
+                            self.next()
+                    # state == "UNKNOWN" (renderer unreachable): nothing to
+                    # do here: AppState's ticker thread is responsible for
+                    # surfacing connectivity to the UI. We simply don't
+                    # advance the queue on an indeterminate state.
+            except Exception as e:
+                logger.debug(f"Monitor loop iteration error: {e}")
+            time.sleep(1.5)
+
+    def start_monitoring(self):
+        if self.use_gena:
+            self._start_gena_listener()
+        else:
+            self._start_local_monitor_thread()
+
+    def shutdown(self):
+        """Cleans up background assets on application close or renderer switch."""
+        logger.info("Tearing down PlayQueue resources.")
+        if hasattr(self, 'renewal_timer'):
+            self.renewal_timer.cancel()
+
+        self.running = False

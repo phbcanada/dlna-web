@@ -1,0 +1,50 @@
+# dlna-web.service
+#
+# Runs the DLNA Web Controller under waitress (a production WSGI server)
+# as a systemd service, so it starts automatically at boot and restarts
+# itself if it ever crashes.
+#
+# --- Before installing, edit the two paths/values below to match your Pi: ---
+#   User / Group     the account that owns the project files
+#   WorkingDirectory  where you unzipped/cloned the project
+#   ExecStart         path to waitress-serve inside your venv
+#   --port            change if 5000/8080/whatever is taken on your Pi
+#
+# Install:
+#   sudo cp dlna-web.service /etc/systemd/system/dlna-web.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dlna-web
+#
+# Check on it:
+#   sudo systemctl status dlna-web
+#   journalctl -u dlna-web -f
+
+[Unit]
+Description=DLNA Web Controller
+# SSDP discovery and the GENA event callback both need a real network
+# interface up, not just systemd's notion of "networking started" --
+# network-online.target waits for that.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/dlna-web
+ExecStart=/home/pi/dlna-web/venv/bin/waitress-serve --host=0.0.0.0 --port=8080 app:app
+
+# DEBUG gives verbose SOAP/GENA/SSDP tracing in the console panel and
+# journalctl -- switch to INFO once things are working reliably.
+Environment=DLNA_LOG_LEVEL=INFO
+
+Restart=on-failure
+RestartSec=5
+
+# Send stdout/stderr to the systemd journal instead of a file.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dlna-web
+
+[Install]
+WantedBy=multi-user.target

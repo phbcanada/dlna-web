@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DLNA Control</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="rack">
+
+  <!-- ============================================================ -->
+  <!-- Top bar: brand + device selectors                            -->
+  <!-- ============================================================ -->
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <span class="brand-mark">◐</span>
+      <span class="brand-name">DLNA CONTROL</span>
+    </div>
+
+    <div class="device-chips">
+      <div class="chip" id="server-chip" data-kind="server">
+        <span class="led" id="server-led"></span>
+        <span class="chip-label">MEDIA SERVER</span>
+        <span class="chip-value" id="server-value">Not connected</span>
+      </div>
+      <div class="chip" id="renderer-chip" data-kind="renderer">
+        <span class="led" id="renderer-led"></span>
+        <span class="chip-label">OUTPUT</span>
+        <span class="chip-value" id="renderer-value">Not connected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Device picker dropdown, shared by both chips -->
+  <div class="device-picker hidden" id="device-picker">
+    <div class="picker-header">
+      <span id="picker-title">Select device</span>
+      <button class="btn-icon" id="picker-rescan" title="Rescan">⟳</button>
+      <button class="btn-icon" id="picker-close" title="Close">✕</button>
+    </div>
+    <div class="picker-list" id="picker-list">
+      <div class="picker-empty">Scanning…</div>
+    </div>
+    <div class="picker-manual">
+      <input type="text" id="picker-manual-url" placeholder="…or paste a description XML URL">
+      <button class="btn-sm" id="picker-manual-go">Connect</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- Main grid: browse / queue+transport                          -->
+  <!-- ============================================================ -->
+  <main class="main-grid" id="main-grid">
+
+    <!-- Browse panel -->
+    <section class="panel" id="browse-panel">
+      <div class="panel-header">
+        <h2>Browse</h2>
+        <button class="btn-sm" id="add-folder-btn">Queue all in folder</button>
+      </div>
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <div class="list" id="browse-list">
+        <div class="list-empty">Connect a media server to browse your music.</div>
+      </div>
+    </section>
+
+    <!-- Queue + transport panel -->
+    <section class="panel" id="queue-panel">
+      <div class="panel-header">
+        <h2>Play Queue</h2>
+        <div class="panel-header-actions">
+          <button class="btn-sm" id="playlist-save-btn">Save</button>
+          <button class="btn-sm" id="playlist-load-btn">Load</button>
+          <button class="btn-sm btn-danger" id="queue-clear-btn">Clear</button>
+        </div>
+      </div>
+
+      <div class="now-playing">
+        <div class="now-playing-title" id="now-playing-title">Nothing playing</div>
+        <div class="progress-row">
+          <span class="time-code" id="position-code">00:00:00</span>
+          <div class="led-bar" id="led-bar"></div>
+          <span class="time-code" id="duration-code">00:00:00</span>
+        </div>
+      </div>
+
+      <div class="transport">
+        <button class="btn-transport" id="prev-btn" title="Previous">⏮</button>
+        <button class="btn-transport btn-transport-main" id="playpause-btn" title="Play / Pause">▶</button>
+        <button class="btn-transport" id="stop-btn" title="Stop">⏹</button>
+        <button class="btn-transport" id="next-btn" title="Next">⏭</button>
+        <span class="transport-state" id="transport-state">STOPPED</span>
+      </div>
+
+      <div class="list" id="queue-list">
+        <div class="list-empty">Queue is empty.</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ============================================================ -->
+  <!-- Drag handle: resize the console panel                        -->
+  <!-- ============================================================ -->
+  <div class="console-splitter" id="console-splitter" title="Drag to resize the console"></div>
+
+  <!-- ============================================================ -->
+  <!-- Log / console drawer                                         -->
+  <!-- ============================================================ -->
+  <footer class="console" id="console">
+    <div class="console-header" id="console-toggle">
+      <span>Console</span>
+      <span class="console-hint" id="console-hint"></span>
+      <span class="console-caret">▲</span>
+    </div>
+    <div class="console-body" id="console-body"></div>
+  </footer>
+
+</div>
+
+<!-- Lightweight prompt modal (used for save/load playlist names) -->
+<div class="modal-backdrop hidden" id="modal-backdrop">
+  <div class="modal">
+    <div class="modal-title" id="modal-title">Playlist name</div>
+    <input type="text" id="modal-input" autocomplete="off">
+    <div class="modal-list" id="modal-list"></div>
+    <div class="modal-actions">
+      <button class="btn-sm" id="modal-cancel">Cancel</button>
+      <button class="btn-sm btn-primary" id="modal-confirm">OK</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toast-stack"></div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,683 @@
+/* ===========================================================
+   Design tokens
+   Subject: a home-network control point for physical DLNA/UPnP
+   gear (receivers, streamers, NAS media servers). The visual
+   identity borrows from a hi-fi rack front panel: dark brushed
+   casing, status LEDs, monospace numeric readouts, and a
+   segmented-block level meter for playback progress -- a direct
+   callback to the original CLI's block-character progress bar.
+   =========================================================== */
+:root {
+  --bg-casing: #121417;
+  --panel: #1b1e22;
+  --panel-alt: #22262b;
+  --panel-raised: #262a30;
+  --border: #2d3238;
+  --border-soft: #24282d;
+
+  --text: #e7e4dc;
+  --text-muted: #8b9199;
+  --text-dim: #5c6167;
+
+  --led-green: #5fd97a;
+  --led-green-dim: #2c5a38;
+  --led-amber: #e0a72e;
+  --led-red: #e0605d;
+  --led-off: #3a3f45;
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-casing);
+  color: var(--text);
+  font-family: var(--font-sans);
+  height: 100%;
+}
+body {
+  background-image:
+    radial-gradient(ellipse at top, rgba(255,255,255,0.02), transparent 60%);
+}
+
+button {
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+
+input {
+  font-family: var(--font-sans);
+}
+
+::selection { background: var(--led-green-dim); }
+
+/* ---------------------------------------------------------
+   Layout shell
+   --------------------------------------------------------- */
+.rack {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  /* Fallback only: if the viewport is genuinely below a usable minimum
+     (panels + console can't all fit even at their floor sizes), the whole
+     page scrolls rather than clipping the console off the bottom. At or
+     above a reasonable size, nothing here should need to scroll. */
+  overflow-y: auto;
+}
+
+/* ---------------------------------------------------------
+   Top bar
+   --------------------------------------------------------- */
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 20px;
+  background: linear-gradient(180deg, #1a1d21, #16181b);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  letter-spacing: 0.08em;
+}
+
+.brand-mark {
+  color: var(--led-green);
+  font-size: 20px;
+  filter: drop-shadow(0 0 6px rgba(95, 217, 122, 0.5));
+}
+
+.brand-name {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.12em;
+  color: var(--text);
+}
+
+.device-chips {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px 7px 10px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.chip:hover {
+  border-color: #40464d;
+  background: var(--panel-alt);
+}
+
+.chip-label {
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  font-size: 10.5px;
+}
+
+.chip-value {
+  color: var(--text);
+  font-family: var(--font-mono);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.led {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--led-off);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.4);
+  flex-shrink: 0;
+}
+
+.led.on {
+  background: var(--led-green);
+  box-shadow: 0 0 8px rgba(95, 217, 122, 0.85), inset 0 0 0 1px rgba(0,0,0,0.2);
+}
+
+.led.warn {
+  background: var(--led-amber);
+  box-shadow: 0 0 8px rgba(224, 167, 46, 0.8), inset 0 0 0 1px rgba(0,0,0,0.2);
+}
+
+.led.off-state {
+  background: var(--led-red);
+  box-shadow: 0 0 8px rgba(224, 96, 93, 0.7), inset 0 0 0 1px rgba(0,0,0,0.2);
+}
+
+.led.pulse {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+/* ---------------------------------------------------------
+   Device picker dropdown
+   --------------------------------------------------------- */
+.device-picker {
+  position: absolute;
+  top: 62px;
+  right: 20px;
+  width: 340px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  z-index: 50;
+  overflow: hidden;
+}
+
+.device-picker.hidden { display: none; }
+
+.picker-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.picker-header span:first-child { flex: 1; font-weight: 600; color: var(--text); }
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.btn-icon:hover { background: var(--panel-alt); color: var(--text); }
+
+.picker-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.picker-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.picker-item:hover { background: var(--panel-alt); cursor: pointer; }
+.picker-item .name { color: var(--text); }
+.picker-item .url { color: var(--text-dim); font-family: var(--font-mono); font-size: 10.5px; }
+
+.picker-empty {
+  padding: 16px 12px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+
+.picker-manual {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.picker-manual input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------
+   Buttons (shared)
+   --------------------------------------------------------- */
+.btn-sm {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px 11px;
+  font-size: 12px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.btn-sm:hover { border-color: #454b52; background: var(--panel-raised); }
+
+.btn-primary {
+  background: var(--led-green-dim);
+  border-color: var(--led-green);
+  color: #d9ffe3;
+}
+
+.btn-danger:hover { border-color: var(--led-red); color: #ffd7d5; }
+
+/* ---------------------------------------------------------
+   Main grid
+   --------------------------------------------------------- */
+.main-grid {
+  flex: 1 1 auto;
+  /* The critical property: without min-height:0, a flex child's default
+     min-height is "auto" (its content size), which lets it push past its
+     flex-allocated space instead of shrinking to fit -- that's what was
+     forcing the console off the bottom of the page. */
+  min-height: 220px;
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+@media (max-width: 860px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: 45vh;
+    overflow-y: auto;
+  }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.panel-header-actions { display: flex; gap: 6px; }
+
+.breadcrumb {
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.breadcrumb .crumb { cursor: pointer; color: var(--text-muted); }
+.breadcrumb .crumb:hover { color: var(--led-green); }
+.breadcrumb .sep { margin: 0 6px; color: var(--text-dim); }
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.list-empty {
+  padding: 30px 16px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 13.5px;
+}
+.row:hover { background: var(--panel-alt); }
+
+.row-icon { width: 18px; text-align: center; color: var(--text-dim); flex-shrink: 0; }
+.row-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.row.folder .row-title:hover { color: var(--led-green); }
+
+.row-action {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 4px 8px;
+  flex-shrink: 0;
+}
+.row-action:hover { border-color: var(--led-green); color: var(--led-green); }
+
+.row.queue-row.active { background: var(--led-green-dim); }
+.row.queue-row.active .row-title { color: #d9ffe3; }
+.row-index { font-family: var(--font-mono); color: var(--text-dim); font-size: 11px; width: 20px; flex-shrink: 0; }
+
+/* ---------------------------------------------------------
+   Now playing / transport
+   --------------------------------------------------------- */
+.now-playing {
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.now-playing-title {
+  font-size: 14.5px;
+  margin-bottom: 10px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.time-code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  width: 62px;
+  flex-shrink: 0;
+}
+.time-code:last-child { text-align: right; }
+
+/* Segmented LED-style meter -- the signature element, echoing the
+   original CLI's "█████░░░░░" progress bar as physical-looking LEDs. */
+.led-bar {
+  flex: 1;
+  display: flex;
+  gap: 2px;
+  height: 14px;
+  padding: 2px;
+  background: #0e1012;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.led-bar .seg {
+  flex: 1;
+  border-radius: 1px;
+  background: var(--led-off);
+}
+
+.led-bar .seg.filled {
+  background: var(--led-green);
+  box-shadow: 0 0 4px rgba(95, 217, 122, 0.6);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.btn-transport {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  width: 36px;
+  height: 32px;
+  border-radius: 4px;
+  font-size: 14px;
+}
+.btn-transport:hover { border-color: var(--led-green); }
+
+.btn-transport-main {
+  width: 46px;
+  background: var(--panel-raised);
+}
+
+.transport-state {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 8px;
+}
+
+/* ---------------------------------------------------------
+   Console resize splitter
+   --------------------------------------------------------- */
+.console-splitter {
+  flex: 0 0 auto;
+  height: 7px;
+  cursor: row-resize;
+  background: var(--bg-casing);
+  position: relative;
+  touch-action: none;
+}
+
+.console-splitter::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 120ms ease;
+}
+
+.console-splitter:hover::before,
+.console-splitter.dragging::before {
+  background: var(--led-green);
+}
+
+.console-splitter.hidden {
+  display: none;
+}
+
+/* ---------------------------------------------------------
+   Console / log drawer
+   --------------------------------------------------------- */
+.console {
+  border-top: 1px solid var(--border);
+  background: #0e1012;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 240px; /* default; drag the splitter above to resize, JS clamps to viewport */
+}
+
+.console.collapsed {
+  height: auto !important; /* header only; overrides any inline drag height */
+}
+
+.console-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+
+.console-hint {
+  flex: 1;
+  text-align: right;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.console-caret { transition: transform 150ms ease; color: var(--text-dim); }
+.console.collapsed .console-caret { transform: rotate(180deg); }
+
+.console-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 20px 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.console.collapsed .console-body { display: none; }
+
+.log-line { white-space: pre-wrap; word-break: break-word; }
+.log-line .lvl { display: inline-block; width: 58px; flex-shrink: 0; }
+.log-line.INFO .lvl { color: var(--led-green); }
+.log-line.WARNING .lvl { color: var(--led-amber); }
+.log-line.ERROR .lvl, .log-line.CRITICAL .lvl { color: var(--led-red); }
+.log-line.DEBUG .lvl { color: var(--text-dim); }
+.log-line .ts { color: var(--text-dim); margin-right: 8px; }
+.log-line .msg { color: var(--text-muted); }
+
+/* ---------------------------------------------------------
+   Modal (playlist save/load)
+   --------------------------------------------------------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-backdrop.hidden { display: none; }
+
+.modal {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 320px;
+  padding: 16px;
+}
+
+.modal-title {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  letter-spacing: 0.04em;
+}
+
+.modal input {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.modal-list {
+  max-height: 160px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+.modal-list .item {
+  padding: 6px 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.modal-list .item:hover { background: var(--panel-alt); color: var(--text); }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ---------------------------------------------------------
+   Toasts
+   --------------------------------------------------------- */
+.toast-stack {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+}
+
+.toast {
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--led-green);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+  max-width: 300px;
+  animation: toast-in 150ms ease;
+}
+.toast.error { border-left-color: var(--led-red); }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Accessibility: visible keyboard focus */
+button:focus-visible, input:focus-visible, .row:focus-visible, .chip:focus-visible {
+  outline: 2px solid var(--led-green);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .led.pulse, .toast { animation: none; }
+}
