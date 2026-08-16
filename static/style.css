@@ -272,6 +272,12 @@ input {
 }
 .btn-sm:hover { border-color: #454b52; background: var(--panel-raised); }
 
+.btn-sm:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none; /* also suppresses the hover style while disabled */
+}
+
 .btn-primary {
   background: var(--led-green-dim);
   border-color: var(--led-green);
@@ -375,18 +381,9 @@ input {
 
 .row-icon { width: 18px; text-align: center; color: var(--text-dim); flex-shrink: 0; }
 .row-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.row.folder .row-title:hover { color: var(--led-green); }
-
-.row-action {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  border-radius: 4px;
-  font-size: 11px;
-  padding: 4px 8px;
-  flex-shrink: 0;
-}
-.row-action:hover { border-color: var(--led-green); color: var(--led-green); }
+/* Every row's title is clickable (folders navigate, files queue, queue
+   rows play) -- one consistent hover affordance for all of them. */
+.row-title:hover { color: var(--led-green); }
 
 .row.queue-row.active { background: var(--led-green-dim); }
 .row.queue-row.active .row-title { color: #d9ffe3; }

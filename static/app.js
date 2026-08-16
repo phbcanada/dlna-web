@@ -270,9 +270,15 @@ async function navigateBackTo(steps) {
   }
 }
 
+function setAddFolderButtonEnabled(items) {
+  const hasTracks = Array.isArray(items) && items.some((item) => item.type === "file");
+  el("add-folder-btn").disabled = !hasTracks;
+}
+
 function renderBrowseList(items) {
   const list = el("browse-list");
   list.innerHTML = "";
+  setAddFolderButtonEnabled(items);
   if (!items || items.length === 0) {
     list.innerHTML = `<div class="list-empty">This folder is empty.</div>`;
     return;
@@ -289,10 +295,9 @@ function renderBrowseList(items) {
     } else {
       row.innerHTML =
         `<span class="row-icon">\u{1F3B5}</span>` +
-        `<span class="row-title"></span>` +
-        `<button class="row-action">+ Queue</button>`;
+        `<span class="row-title"></span>`;
       row.querySelector(".row-title").textContent = item.title;
-      row.querySelector(".row-action").addEventListener("click", () => addToQueue(item));
+      row.querySelector(".row-title").addEventListener("click", () => addToQueue(item));
     }
     list.appendChild(row);
   });
@@ -316,6 +321,7 @@ async function refreshBrowse() {
   } catch (e) {
     el("browse-list").innerHTML = `<div class="list-empty">Connect a media server to browse your music.</div>`;
     el("breadcrumb").innerHTML = "";
+    setAddFolderButtonEnabled(null);
   }
 }
 
