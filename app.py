@@ -259,6 +259,19 @@ def api_queue_play_at():
     return jsonify({"ok": ok, **state.queue.snapshot()})
 
 
+@app.route("/api/queue/remove", methods=["POST"])
+def api_queue_remove():
+    err = _require_queue()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    idx = data.get("index")
+    if idx is None:
+        return jsonify({"error": "index is required"}), 400
+    ok = state.queue.remove_at(int(idx))
+    return jsonify({"ok": ok, **state.queue.snapshot()})
+
+
 @app.route("/api/queue/toggle", methods=["POST"])
 def api_queue_toggle():
     err = _require_queue()

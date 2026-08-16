@@ -165,6 +165,43 @@ class PlayQueue:
         self._publish_queue_status()
         return ok
 
+    def remove_at(self, index):
+        """Removes the track at `index` from the queue -- used by the "X"
+        button on each queue row. If that track is the currently-selected
+        one, playback moves on to whatever now sits in its place (the
+        track that followed it), the same as the Next transport control;
+        if there's nothing after it, playback stops instead, mirroring
+        end-of-queue. Removing a track before the current one just shifts
+        current_idx down to keep pointing at the same logical track, with
+        no effect on playback. Removing one after it has no effect at all."""
+        with self.lock:
+            if not (0 <= index < len(self.queue)):
+                return False
+
+            removing_current = (index == self.current_idx)
+            removed = self.queue.pop(index)
+            logger.info(f"Removed from queue: {removed.get('title', 'Unknown')}")
+
+            if not self.queue:
+                self.current_idx = -1
+                self.stop()
+            elif removing_current:
+                if index < len(self.queue):
+                    # The track that followed it has slid into this same
+                    # position -- play it, same as the Next button would.
+                    self.current_idx = index
+                    self._play_current()
+                else:
+                    # Removed the last (and current) track -- nothing to
+                    # advance to, so just stop, same as end-of-queue.
+                    self.current_idx = len(self.queue) - 1
+                    logger.info("Removed the last (and currently playing) track -- nothing left to advance to.")
+                    self.stop()
+            elif index < self.current_idx:
+                self.current_idx -= 1
+        self._publish_queue_status()
+        return True
+
     # ------------------------------------------------------------------
     # GENA subscription plumbing
     # ------------------------------------------------------------------

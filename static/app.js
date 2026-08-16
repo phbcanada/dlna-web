@@ -358,12 +358,29 @@ function renderQueue(snapshot) {
     row.innerHTML =
       `<span class="row-index"></span>` +
       `<span class="row-icon">${idx === snapshot.current_idx ? "\u25B6" : "\u{1F3B5}"}</span>` +
-      `<span class="row-title"></span>`;
+      `<span class="row-title"></span>` +
+      `<button class="row-remove" title="Remove from queue">\u{1F5D1}\uFE0F</button>`;
     row.querySelector(".row-index").textContent = idx + 1;
     row.querySelector(".row-title").textContent = track.title;
     row.querySelector(".row-title").addEventListener("click", () => playAt(idx));
+    row.querySelector(".row-remove").addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeFromQueue(idx);
+    });
     list.appendChild(row);
   });
+}
+
+async function removeFromQueue(idx) {
+  try {
+    // Render immediately from the response (same pattern as playAt) so
+    // the row disappears and the highlight/now-playing update without
+    // waiting on the SSE round-trip.
+    const data = await apiPost("/api/queue/remove", { index: idx });
+    renderQueue(data);
+  } catch (e) {
+    toast(`Could not remove track: ${e.message}`, true);
+  }
 }
 
 async function playAt(idx) {
