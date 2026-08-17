@@ -1,3 +1,18 @@
+# Copyright (c) 2026 Paul H. Breslin
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
 # app.py
 #
 # Entry point for the DLNA web controller.
@@ -26,7 +41,7 @@
 #                          deploy time; there's no runtime picker for this
 #                          anymore -- see state.py's startup().
 #   QUEUE_TRACK_LIMIT      max direct-child tracks a single "queue this
-#                          folder" action may add at once (default 100).
+#                          folder" action may add at once (default 200).
 #                          Deliberately not recursive -- see
 #                          DLNABrowser.count_tracks(). Enforced server-side
 #                          in api_queue_add_folder(), not just hidden in
@@ -56,7 +71,7 @@ app = Flask(__name__)
 # to queue an unbounded number of tracks (e.g. a media-server view like
 # MiniDLNA's "All Music" that flattens the entire library into one
 # folder's direct children).
-QUEUE_TRACK_LIMIT = int(os.environ.get("QUEUE_TRACK_LIMIT", "100"))
+QUEUE_TRACK_LIMIT = int(os.environ.get("QUEUE_TRACK_LIMIT", "200"))
 
 # Routes reachable even while the library is still indexing -- everything
 # else is blocked (503) until state.library_ready, per the all-or-nothing

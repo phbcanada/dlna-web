@@ -6,7 +6,10 @@ a small Flask service -- point a browser at it from any device on your LAN
 (phone, laptop, another Pi) and you get:
 
 - A **browse panel** for your media server's folder tree, indexed at startup
-  so navigating it is instant
+  so navigating it is instant. Click a track's title to queue it, or use
+  "Queue All"/the per-folder "Queue N Tracks" button to queue everything in
+  a folder at once (capped at `QUEUE_TRACK_LIMIT` tracks -- see "Queue size
+  limit" below)
 - A **queue panel** with click-to-play, remove-from-queue, next/prev/stop,
   and a live LED-style progress meter
 - A **renderer picker** to discover and select the active output device,
@@ -67,7 +70,7 @@ Useful environment variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEDIA_SERVER_DESC_URL` | *(required)* | The media server's UPnP description XML URL -- see "Configuration" above |
-| `QUEUE_TRACK_LIMIT` | `100` | Max direct-child tracks a single "queue this folder" action may add at once -- see "Queue size limit" below |
+| `QUEUE_TRACK_LIMIT` | `200` | Max direct-child tracks a single "queue this folder" action may add at once -- see "Queue size limit" below |
 | `DLNA_LOG_LEVEL` | `INFO` | Set to `DEBUG` for verbose SOAP/GENA/SSDP tracing in the console panel |
 | `DLNA_WEB_PORT` | `5000` | Port to listen on |
 | `DLNA_WEB_CONFIG` | `~/.dlna_web_config.json` | Where the last-selected renderer is remembered |
@@ -79,7 +82,7 @@ entire folder tree, one `Browse` call per folder -- the same lazy caching
 `browse_container()` already did as you navigated, just done eagerly upfront
 instead. Once it's done, browsing anywhere in the library is instant (no
 SOAP round-trip) for the rest of the process's life, and this is also the
-foundation a future "Queue N tracks" button on each folder will read from
+foundation the per-folder "Queue N Tracks" button (see below) reads from
 without needing any further network calls.
 
 **Until that crawl finishes, the whole app is gated** -- the page shows an
@@ -111,7 +114,7 @@ library actually changes.
 
 ## Queue size limit
 
-`QUEUE_TRACK_LIMIT` (default 100) caps how many tracks a single "queue
+`QUEUE_TRACK_LIMIT` (default 200) caps how many tracks a single "queue
 this folder" action can add at once, counting only that folder's *direct*
 children -- deliberately not recursive, since queueing an entire subtree
 in one click is exactly the runaway-queueing scenario this exists to
@@ -122,12 +125,11 @@ media server's configuration. Some DLNA servers (MiniDLNA in particular)
 expose database-driven views alongside the real folder tree by default --
 an "All Music" container with literally every track as a direct child,
 plus per-Artist, per-Album, and per-Genre views that are alternate paths
-to the same files, not additional ones. Without this cap, "Queue All" (or
-the folder-level "Queue N Tracks" button once it exists) would happily
-queue your *entire* library in one click if you ever navigated into one
-of those. `DLNABrowser.count_tracks()` is what backs the cap -- an
-in-memory count off the already-warmed cache, so checking it costs
-nothing extra at request time.
+to the same files, not additional ones. Without this cap, "Queue All" (and the per-folder "Queue N Tracks" button)
+would happily queue your *entire* library in one click if you ever
+navigated into one of those. `DLNABrowser.count_tracks()` is what backs
+the cap -- an in-memory count off the already-warmed cache, so checking it
+costs nothing extra at request time.
 
 The limit is enforced in two places, not just one: `api_queue_add_folder()`
 in `app.py` checks it server-side and rejects with a clear error over the
@@ -248,11 +250,15 @@ the files, `sudo systemctl start dlna-web`.
   (re-running `warm_cache()` on demand rather than only at startup) would
   be a natural addition if the library changes often enough for that to
   matter.
-- **"Queue N tracks" per folder** is planned but not yet built -- the
-  indexing/caching, and now the track-count/limit machinery
-  (`DLNABrowser.count_tracks()`, `QUEUE_TRACK_LIMIT`), are the groundwork
-  for it. The eventual per-folder button will follow the same rule as
-  "Queue All" already does: hidden above the limit rather than shown
-  disabled, per how it's meant to render in a folder listing.
 - No auth. Fine on a trusted home LAN; if you ever expose this beyond your
   LAN, put it behind a reverse proxy with auth in front.
+
+## License
+
+Copyright (c) 2026 Paul H. Breslin.
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version. See the LGPL header at the top of each
+source file, or <https://www.gnu.org/licenses/>, for the full terms.
