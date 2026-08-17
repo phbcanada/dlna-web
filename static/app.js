@@ -258,6 +258,21 @@ async function navigateBackTo(steps) {
   }
 }
 
+// Icon per file's broad media category (from DIDL-Lite's upnp:class,
+// classified server-side -- see dlnabrowser.py's classify_media_type()).
+// Display only, same as everywhere else in this app: never gates what
+// can be queued, just which glyph shows next to it.
+const MEDIA_TYPE_ICONS = {
+  audio: "\u{1F3B5}",        // musical note
+  video: "\u{1F3AC}",        // clapper board
+  image: "\u{1F5BC}\uFE0F",  // framed picture
+  other: "\u{1F4C4}",        // page facing up
+};
+
+function iconForMediaType(mediaType) {
+  return MEDIA_TYPE_ICONS[mediaType] || MEDIA_TYPE_ICONS.other;
+}
+
 function setAddFolderButtonState(fileCount, limit) {
   const btn = el("add-folder-btn");
   if (fileCount === null || fileCount === undefined) {
@@ -314,7 +329,7 @@ function renderBrowseList(data) {
       }
     } else {
       row.innerHTML =
-        `<span class="row-icon">\u{1F3B5}</span>` +
+        `<span class="row-icon">${iconForMediaType(item.media_type)}</span>` +
         `<span class="row-title"></span>`;
       row.querySelector(".row-title").textContent = item.title;
       row.querySelector(".row-title").addEventListener("click", () => addToQueue(item));
@@ -637,8 +652,30 @@ function connectStream() {
     // reveal in the first place. checkLibraryStatus() is a harmless
     // no-op if nothing has actually changed.
     checkLibraryStatus();
+    // Also resync general app status (queue, renderer, position). If the
+    // connection was dropped for a while -- e.g. a mobile browser
+    // suspending a backgrounded tab -- any queue_status events published
+    // during that gap are gone for good; there's no replay for a
+    // reconnecting client. The "Now Playing" bar self-corrects on its own
+    // (it's polled every second regardless of what changed), but the
+    // queue panel only ever updates in response to a change event, so
+    // without this it can be left showing stale content indefinitely.
+    refreshStatus();
   };
 }
+
+// A tab returning to the foreground is the actual signal that matters
+// for the "left the queue stale after a while backgrounded" case (e.g.
+// iPad Safari, switching apps for a stretch while tracks keep playing) --
+// more direct than relying on the SSE connection's own reconnect timing,
+// since some mobile browsers can suspend JS execution for a backgrounded
+// tab without necessarily tearing the connection down in a way this page
+// notices promptly. refreshStatus() is cheap and safe to call redundantly.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    refreshStatus();
+  }
+});
 
 // ---------------------------------------------------------------------
 // Indexing overlay -- shown until the startup library crawl finishes

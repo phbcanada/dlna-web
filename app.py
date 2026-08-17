@@ -171,6 +171,7 @@ def _browse_payload(items):
         entry = {"type": item_type, "id": data.get("id"), "title": data.get("title")}
         if item_type == "file":
             entry["uri"] = data.get("uri")
+            entry["media_type"] = data.get("media_type", "other")
             file_count += 1
         elif item_type == "folder":
             # Direct-child count only (not recursive) -- an in-memory

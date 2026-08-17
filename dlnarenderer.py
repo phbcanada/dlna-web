@@ -40,11 +40,19 @@ class DLNARenderer:
     """Handles UPnP AVTransport devices (Renderers/Players) for controlling playback."""
     NS_SOAP = "http://schemas.xmlsoap.org/soap/envelope/"
     NS_AVT = "urn:schemas-upnp-org:service:AVTransport:1"
+    NS_CM = "urn:schemas-upnp-org:service:ConnectionManager:1"
 
     def __init__(self):
         self.desc_url = None
         self.control_url = None
         self.friendly_name = "None"
+        self.connection_manager_control_url = None
+        # Captured for potential future use -- NOT currently used for any
+        # compatibility filtering/gating decision. Real-world renderers
+        # are inconsistent enough about accurately reporting this
+        # (it's literally its own DLNA certification test point) that we
+        # deliberately don't act on it yet; see get_sink_protocol_info().
+        self.sink_protocol_info = []
 
     @property
     def host(self):
@@ -160,10 +168,46 @@ class DLNARenderer:
                 self.friendly_name = self.get_friendly_name(desc_url)
                 avtransport_found = True
 
+            if "ConnectionManager:1" in service_type:
+                cm_control_node = service.find('upnp:controlURL', ns)
+                if cm_control_node is not None and cm_control_node.text:
+                    self.connection_manager_control_url = urljoin(desc_url, cm_control_node.text)
+
         if avtransport_found:
+            if self.connection_manager_control_url:
+                self.get_sink_protocol_info()  # best-effort; never blocks selection
             return self.control_url
 
         raise Exception("AVTransport service not found on this device.")
+
+    def get_sink_protocol_info(self):
+        """Fetches the renderer's supported playback formats via
+        ConnectionManager::GetProtocolInfo -- captured on self.sink_protocol_info
+        for potential future use, but nothing currently reads it. Safe to
+        fail silently: many renderers implement this action inconsistently
+        or not at all, which is fine precisely because nothing depends on
+        it succeeding."""
+        soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="{self.NS_SOAP}" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:GetProtocolInfo xmlns:u="{self.NS_CM}"></u:GetProtocolInfo>
+  </s:Body>
+</s:Envelope>"""
+        headers = {
+            "Content-Type": 'text/xml; charset="utf-8"',
+            "SOAPACTION": f'"{self.NS_CM}#GetProtocolInfo"',
+            "Connection": "close"
+        }
+        try:
+            r = requests.post(self.connection_manager_control_url, data=soap, headers=headers, timeout=4)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            sink_node = root.find(".//Sink")
+            if sink_node is not None and sink_node.text:
+                self.sink_protocol_info = [p.strip() for p in sink_node.text.split(",") if p.strip()]
+                logger.info(f"Renderer reports {len(self.sink_protocol_info)} supported playback format(s).")
+        except Exception as e:
+            logger.debug(f"GetProtocolInfo not available (not used for anything critical): {e}")
 
     def select_renderer(self):
         """Interactive console menu to discover and select a renderer. (CLI only --

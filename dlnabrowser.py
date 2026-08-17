@@ -34,11 +34,47 @@ import logging
 logger = logging.getLogger("dlnabrowser")
 
 
+def classify_media_type(upnp_class, protocol_info):
+    """Broad category for a file item -- 'audio', 'video', 'image', or
+    'other' -- used only to pick a display icon in the browse list, never
+    for compatibility/filtering decisions (real-world renderers are
+    notoriously inconsistent about accurately reporting what they
+    actually support, so nothing here gates what can be queued).
+
+    Prefers upnp:class: a required, reliably-populated DIDL-Lite field,
+    unlike the res element's protocolInfo/DLNA profile reporting which
+    varies a lot between server and renderer implementations. Falls back
+    to the MIME type parsed out of protocolInfo (protocol:network:
+    contentFormat:additionalInfo) if upnp:class is missing or an
+    unrecognized value."""
+    if upnp_class:
+        if "audioItem" in upnp_class:
+            return "audio"
+        if "videoItem" in upnp_class:
+            return "video"
+        if "imageItem" in upnp_class:
+            return "image"
+
+    if protocol_info:
+        parts = protocol_info.split(":")
+        if len(parts) >= 3:
+            mime = parts[2]
+            if mime.startswith("audio/"):
+                return "audio"
+            if mime.startswith("video/"):
+                return "video"
+            if mime.startswith("image/"):
+                return "image"
+
+    return "other"
+
+
 class DLNABrowser:
     """Handles parsing the media tree from UPnP/DLNA media servers."""
     DEFAULT_DESC_URL = "http://192.168.132.5:8200/rootDesc.xml"
     NS_SOAP = "http://schemas.xmlsoap.org/soap/envelope/"
     NS_CD = "urn:schemas-upnp-org:service:ContentDirectory:1"
+    NS_DIDL_UPNP = "urn:schemas-upnp-org:metadata-1-0/upnp/"
 
     def __init__(self):
         self.desc_url = None
@@ -255,19 +291,33 @@ class DLNABrowser:
                     elif tag == 'item':
                         res_node = el.find('{urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/}res')
                         uri = res_node.text if res_node is not None else ""
+                        protocol_info = res_node.attrib.get('protocolInfo') if res_node is not None else None
+                        class_node = el.find(f'{{{self.NS_DIDL_UPNP}}}class')
+                        upnp_class = class_node.text if class_node is not None else None
                         items.append(('file', {
                             'id': el.attrib.get('id'),
                             'title': el.find('{http://purl.org/dc/elements/1.1/}title').text,
-                            'uri': uri
+                            'uri': uri,
+                            'media_type': classify_media_type(upnp_class, protocol_info),
                         }))
             except Exception:
                 folders = re.findall(r'<container\s+id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>', result_xml, re.DOTALL)
                 for fid, ftitle in folders:
                     items.append(('folder', {'id': fid, 'title': ftitle}))
 
-                files = re.findall(r'<item\s+id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>.*?<res[^>]*>([^<]+)</res>', result_xml, re.DOTALL)
-                for fid, ftitle, furi in files:
-                    items.append(('file', {'id': fid, 'title': ftitle, 'uri': furi}))
+                files = re.findall(
+                    r'<item\s+id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>'
+                    r'(?:.*?<upnp:class>([^<]*)</upnp:class>)?'
+                    r'.*?<res([^>]*)>([^<]+)</res>',
+                    result_xml, re.DOTALL
+                )
+                for fid, ftitle, uclass, res_attrs, furi in files:
+                    pi_match = re.search(r'protocolInfo="([^"]*)"', res_attrs)
+                    protocol_info = pi_match.group(1) if pi_match else None
+                    items.append(('file', {
+                        'id': fid, 'title': ftitle, 'uri': furi,
+                        'media_type': classify_media_type(uclass or None, protocol_info),
+                    }))
 
             self.cache[container_id] = items
             return items
