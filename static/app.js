@@ -258,15 +258,30 @@ async function navigateBackTo(steps) {
   }
 }
 
-function setAddFolderButtonEnabled(items) {
-  const hasTracks = Array.isArray(items) && items.some((item) => item.type === "file");
-  el("add-folder-btn").disabled = !hasTracks;
+function setAddFolderButtonState(fileCount, limit) {
+  const btn = el("add-folder-btn");
+  if (fileCount === null || fileCount === undefined) {
+    btn.disabled = true;
+    btn.title = "";
+    return;
+  }
+  if (fileCount === 0) {
+    btn.disabled = true;
+    btn.title = "This folder has no tracks directly in it.";
+  } else if (fileCount > limit) {
+    btn.disabled = true;
+    btn.title = `This folder has ${fileCount} tracks, which exceeds the ${limit}-track queue limit.`;
+  } else {
+    btn.disabled = false;
+    btn.title = "";
+  }
 }
 
-function renderBrowseList(items) {
+function renderBrowseList(data) {
+  const items = data.items;
   const list = el("browse-list");
   list.innerHTML = "";
-  setAddFolderButtonEnabled(items);
+  setAddFolderButtonState(data.file_count, data.queue_track_limit);
   if (!items || items.length === 0) {
     list.innerHTML = `<div class="list-empty">This folder is empty.</div>`;
     return;
@@ -280,6 +295,23 @@ function renderBrowseList(items) {
         `<span class="row-title"></span>`;
       row.querySelector(".row-title").textContent = item.title;
       row.querySelector(".row-title").addEventListener("click", () => enterFolder(item));
+
+      // Direct-children-only track count, hidden entirely (not just
+      // disabled) above the queue limit -- queueing an oversized folder
+      // from a listing isn't offered at all, same rule "Queue All" enforces
+      // for the currently-browsed folder.
+      if (item.track_count > 0 && item.track_count <= data.queue_track_limit) {
+        const queueBtn = document.createElement("button");
+        queueBtn.className = "row-queue-folder";
+        const trackWord = item.track_count === 1 ? "track" : "tracks";
+        queueBtn.title = `Queue ${item.track_count} ${trackWord} from "${item.title}"`;
+        queueBtn.innerHTML = `${item.track_count} \u2795\uFE0F`;
+        queueBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          queueFolder(item);
+        });
+        row.appendChild(queueBtn);
+      }
     } else {
       row.innerHTML =
         `<span class="row-icon">\u{1F3B5}</span>` +
@@ -291,11 +323,20 @@ function renderBrowseList(items) {
   });
 }
 
+async function queueFolder(item) {
+  try {
+    const data = await apiPost("/api/queue/add_folder", { id: item.id, title: item.title });
+    toast(`Queued ${data.added} track(s) from "${item.title}".`);
+  } catch (e) {
+    toast(`Could not queue "${item.title}": ${e.message}`, true);
+  }
+}
+
 async function enterFolder(item) {
   try {
     const data = await apiPost("/api/browse/enter", { id: item.id, title: item.title });
     renderBreadcrumb(data.breadcrumb);
-    renderBrowseList(data.items);
+    renderBrowseList(data);
   } catch (e) {
     toast(`Could not open folder: ${e.message}`, true);
   }
@@ -305,11 +346,11 @@ async function refreshBrowse() {
   try {
     const data = await apiGet("/api/browse/current");
     renderBreadcrumb(data.breadcrumb);
-    renderBrowseList(data.items);
+    renderBrowseList(data);
   } catch (e) {
     el("browse-list").innerHTML = `<div class="list-empty">Connect a media server to browse your music.</div>`;
     el("breadcrumb").innerHTML = "";
-    setAddFolderButtonEnabled(null);
+    setAddFolderButtonState(null, null);
   }
 }
 

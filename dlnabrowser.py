@@ -276,6 +276,19 @@ class DLNABrowser:
             logger.warning(f"Browse error on container '{container_id}' (media server may be offline): {e}")
             return []
 
+    def count_tracks(self, container_id):
+        """Direct-child track count for a folder -- deliberately NOT
+        recursive (queueing an entire subtree at once is explicitly out
+        of scope, since it's how a single click could queue thousands of
+        tracks). Backs both the "Queue All" cap and the per-folder
+        "Queue N Tracks" buttons.
+
+        Goes through browse_container(), so once warm_cache() has run at
+        startup this is an in-memory count with no network round-trip --
+        the whole point of pre-scanning the library."""
+        items = self.browse_container(container_id)
+        return sum(1 for item_type, _ in items if item_type == "file")
+
     def warm_cache(self, progress_callback=None, progress_every=10):
         """Recursively walks the entire folder tree from the root, browsing
         every container so its contents land in self.cache -- the exact

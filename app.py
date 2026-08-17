@@ -25,6 +25,12 @@
 #                          http://127.0.0.1:8200/rootDesc.xml). Fixed at
 #                          deploy time; there's no runtime picker for this
 #                          anymore -- see state.py's startup().
+#   QUEUE_TRACK_LIMIT      max direct-child tracks a single "queue this
+#                          folder" action may add at once (default 100).
+#                          Deliberately not recursive -- see
+#                          DLNABrowser.count_tracks(). Enforced server-side
+#                          in api_queue_add_folder(), not just hidden in
+#                          the UI.
 #   DLNA_LOG_LEVEL   DEBUG / INFO / WARNING (default INFO)
 #   DLNA_WEB_PORT    port for the `python app.py` dev-server path (default 5000)
 #   DLNA_WEB_CONFIG  path to the settings JSON file (default ~/.dlna_web_config.json)
@@ -43,6 +49,14 @@ setup_logging()
 logger = logging.getLogger("webapp")
 
 app = Flask(__name__)
+
+# Applies to both "Queue All" (the current folder) and the future
+# per-folder "Queue N Tracks" buttons -- deliberately a hard cap, not a
+# warning, since the whole point is that no single click should be able
+# to queue an unbounded number of tracks (e.g. a media-server view like
+# MiniDLNA's "All Music" that flattens the entire library into one
+# folder's direct children).
+QUEUE_TRACK_LIMIT = int(os.environ.get("QUEUE_TRACK_LIMIT", "100"))
 
 # Routes reachable even while the library is still indexing -- everything
 # else is blocked (503) until state.library_ready, per the all-or-nothing
@@ -152,14 +166,33 @@ def api_select_renderer():
 
 def _browse_payload(items):
     out_items = []
+    file_count = 0
     for item_type, data in items:
         entry = {"type": item_type, "id": data.get("id"), "title": data.get("title")}
         if item_type == "file":
             entry["uri"] = data.get("uri")
+            file_count += 1
+        elif item_type == "folder":
+            # Direct-child count only (not recursive) -- an in-memory
+            # lookup off the already-warmed cache, no extra network call.
+            # Drives the per-folder "Queue N Tracks" button: the frontend
+            # hides it entirely above queue_track_limit, per the same cap
+            # api_queue_add_folder()/api_queue_add_specific_folder() below
+            # enforce for real.
+            entry["track_count"] = state.browser.count_tracks(data["id"])
         out_items.append(entry)
     breadcrumb = [{"id": cid, "title": t} for cid, t in state.browser.history]
     breadcrumb.append({"id": state.browser.current_id, "title": state.browser.current_title})
-    return {"items": out_items, "breadcrumb": breadcrumb, "can_go_back": bool(state.browser.history)}
+    return {
+        "items": out_items,
+        "breadcrumb": breadcrumb,
+        "can_go_back": bool(state.browser.history),
+        # Lets the UI decide the "Queue All" button's state (and the
+        # per-folder "Queue N Tracks" buttons') without a second request --
+        # same cap enforced for real in the two add-folder routes below.
+        "file_count": file_count,
+        "queue_track_limit": QUEUE_TRACK_LIMIT,
+    }
 
 
 @app.route("/api/browse/current")
@@ -234,13 +267,81 @@ def api_queue_add_folder():
     if err:
         return err
     items = state.browser.browse_container(state.browser.current_id)
+    file_items = [(t, d) for t, d in items if t == "file"]
+
+    # Enforced here, not just via the button being disabled client-side --
+    # a stale page, a browser back button, or a client bug shouldn't be
+    # able to bypass the cap. Same limit DLNABrowser.count_tracks() and
+    # the "Queue All" button's own state are based on.
+    if len(file_items) > QUEUE_TRACK_LIMIT:
+        return jsonify({
+            "error": (
+                f"This folder has {len(file_items)} tracks, which exceeds "
+                f"the {QUEUE_TRACK_LIMIT}-track queue limit."
+            )
+        }), 400
+
     count = 0
-    for item_type, data in items:
-        if item_type == "file":
-            entry = dict(data)
+    for item_type, data in file_items:
+        entry = dict(data)
+        entry["relative_path"] = state.browser._get_relative_path(entry["title"], entry["uri"])
+        state.queue.add_to_queue(entry)
+        count += 1
+    return jsonify({"added": count, **state.queue.snapshot()})
+
+
+@app.route("/api/queue/add_folder", methods=["POST"])
+def api_queue_add_specific_folder():
+    """Queues a folder's direct-child tracks by ID -- used by the
+    per-folder "Queue N Tracks" button in a listing, which queues a
+    *child* row without navigating the browse panel into it. Distinct
+    from api_queue_add_folder() above (the "Queue All" button, which
+    always means the currently-browsed folder)."""
+    err = _require_queue()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    folder_id = data.get("id")
+    folder_title = data.get("title", "")
+    if folder_id is None:
+        return jsonify({"error": "id is required"}), 400
+
+    items = state.browser.browse_container(folder_id)
+    file_items = [(t, d) for t, d in items if t == "file"]
+
+    if not file_items:
+        return jsonify({"error": "This folder has no tracks."}), 400
+    if len(file_items) > QUEUE_TRACK_LIMIT:
+        return jsonify({
+            "error": (
+                f"This folder has {len(file_items)} tracks, which exceeds "
+                f"the {QUEUE_TRACK_LIMIT}-track queue limit."
+            )
+        }), 400
+
+    # _get_relative_path() builds its path from self.history/current_title
+    # -- i.e. wherever the browser is *currently* positioned. To get
+    # correct paths for a folder we're deliberately NOT navigating to,
+    # step into it just long enough to compute them, then restore the
+    # real position exactly -- the browse panel shouldn't visibly move.
+    saved_history = list(state.browser.history)
+    saved_current_id = state.browser.current_id
+    saved_current_title = state.browser.current_title
+    try:
+        state.browser.history.append((saved_current_id, saved_current_title))
+        state.browser.current_id = folder_id
+        state.browser.current_title = folder_title
+        count = 0
+        for item_type, item_data in file_items:
+            entry = dict(item_data)
             entry["relative_path"] = state.browser._get_relative_path(entry["title"], entry["uri"])
             state.queue.add_to_queue(entry)
             count += 1
+    finally:
+        state.browser.history = saved_history
+        state.browser.current_id = saved_current_id
+        state.browser.current_title = saved_current_title
+
     return jsonify({"added": count, **state.queue.snapshot()})
 
 

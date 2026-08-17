@@ -67,6 +67,7 @@ Useful environment variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEDIA_SERVER_DESC_URL` | *(required)* | The media server's UPnP description XML URL -- see "Configuration" above |
+| `QUEUE_TRACK_LIMIT` | `100` | Max direct-child tracks a single "queue this folder" action may add at once -- see "Queue size limit" below |
 | `DLNA_LOG_LEVEL` | `INFO` | Set to `DEBUG` for verbose SOAP/GENA/SSDP tracing in the console panel |
 | `DLNA_WEB_PORT` | `5000` | Port to listen on |
 | `DLNA_WEB_CONFIG` | `~/.dlna_web_config.json` | Where the last-selected renderer is remembered |
@@ -107,6 +108,40 @@ the media server, the running app won't notice -- restart the service to
 re-crawl. There's no in-app "rescan" trigger (yet); the whole design here
 assumes a crawl-once-at-boot model, matching how infrequently a home music
 library actually changes.
+
+## Queue size limit
+
+`QUEUE_TRACK_LIMIT` (default 100) caps how many tracks a single "queue
+this folder" action can add at once, counting only that folder's *direct*
+children -- deliberately not recursive, since queueing an entire subtree
+in one click is exactly the runaway-queueing scenario this exists to
+prevent.
+
+This matters more than it might look like it should, depending on your
+media server's configuration. Some DLNA servers (MiniDLNA in particular)
+expose database-driven views alongside the real folder tree by default --
+an "All Music" container with literally every track as a direct child,
+plus per-Artist, per-Album, and per-Genre views that are alternate paths
+to the same files, not additional ones. Without this cap, "Queue All" (or
+the folder-level "Queue N Tracks" button once it exists) would happily
+queue your *entire* library in one click if you ever navigated into one
+of those. `DLNABrowser.count_tracks()` is what backs the cap -- an
+in-memory count off the already-warmed cache, so checking it costs
+nothing extra at request time.
+
+The limit is enforced in two places, not just one: `api_queue_add_folder()`
+in `app.py` checks it server-side and rejects with a clear error over the
+limit, and the "Queue All" button's enabled/disabled state (with a
+tooltip explaining why) is a client-side reflection of the same check --
+the button being disabled is a UI nicety, not the actual guarantee, so a
+stale page or a client bug can't be used to bypass it.
+
+If you'd rather not have MiniDLNA present those extra views at all,
+setting `root_container=B` in `minidlna.conf` restricts what it exposes
+to just the real folder tree. That's a legitimate alternative to raising
+or removing this cap, but not a substitute for it -- the cap protects
+against *any* oversized folder, from any server, for any reason, not just
+MiniDLNA's specific default views.
 
 ## Running it as a boot-time service (recommended for the Pi)
 
@@ -214,12 +249,10 @@ the files, `sudo systemctl start dlna-web`.
   be a natural addition if the library changes often enough for that to
   matter.
 - **"Queue N tracks" per folder** is planned but not yet built -- the
-  indexing/caching this turn is specifically the groundwork for it
-  (reading track counts straight from `DLNABrowser.cache` once it's
-  warmed, no extra network calls needed).
-- `PlayQueue.shutdown()` (called when switching renderers) stops the polling
-  loop but doesn't cleanly tear down a running GENA HTTP listener thread --
-  harmless on a Pi that switches renderers rarely, but worth hardening if
-  you'll be switching outputs often.
+  indexing/caching, and now the track-count/limit machinery
+  (`DLNABrowser.count_tracks()`, `QUEUE_TRACK_LIMIT`), are the groundwork
+  for it. The eventual per-folder button will follow the same rule as
+  "Queue All" already does: hidden above the limit rather than shown
+  disabled, per how it's meant to render in a folder listing.
 - No auth. Fine on a trusted home LAN; if you ever expose this beyond your
   LAN, put it behind a reverse proxy with auth in front.

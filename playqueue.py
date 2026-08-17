@@ -134,6 +134,13 @@ class PlayQueue:
         # =====================================================================
         self.use_gena = True
 
+        # Reference to the running GENA HTTPServer, if any, so shutdown()
+        # can actually stop it and release its port -- without this, the
+        # listener from a previous renderer selection stays bound forever,
+        # and every renderer switch after the first one silently loses
+        # GENA (falls back to polling) because the port is still taken.
+        self.gena_server = None
+
     # ------------------------------------------------------------------
     # Web-facing helpers
     # ------------------------------------------------------------------
@@ -242,6 +249,7 @@ class PlayQueue:
             try:
                 server = HTTPServer((local_ip, local_port), GENAEventHTTPHandler)
                 server.play_queue = self
+                self.gena_server = server
                 server.serve_forever()
             except Exception as e:
                 logger.warning(f"GENA background server failed to start: {e}. Falling back to polling.")
@@ -543,3 +551,21 @@ class PlayQueue:
             self.renewal_timer.cancel()
 
         self.running = False
+
+        if self.gena_server is not None:
+            try:
+                # shutdown() blocks until serve_forever() (running on the
+                # listener's own thread) has actually exited, then
+                # server_close() releases the socket -- by the time this
+                # returns, the port is genuinely free for the next
+                # PlayQueue's GENA listener to bind to. Must be called
+                # from a different thread than serve_forever() is
+                # running on, which is always true here (this runs on
+                # whatever thread triggered the renderer switch).
+                self.gena_server.shutdown()
+                self.gena_server.server_close()
+                logger.info("GENA listener stopped and port released.")
+            except Exception as e:
+                logger.warning(f"Error stopping GENA listener (port may remain briefly held): {e}")
+            finally:
+                self.gena_server = None

@@ -413,6 +413,32 @@ input {
 }
 .row-remove:hover { color: var(--led-red); background: var(--panel-raised); }
 
+/* Per-folder "Queue N Tracks" button in the browse list -- compact
+   count+icon rather than a text label, per the row-width concern that
+   prompted it. Only rendered when a folder has 1..queue_track_limit
+   direct-child tracks. Fixed width (sized for up to "99 +") so every
+   button's icon lines up in the same column regardless of digit count. */
+.row-queue-folder {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 4px 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  width: 46px;
+  box-sizing: border-box;
+  text-align: center;
+}
+.row-queue-folder:hover {
+  border-color: var(--led-green);
+  color: var(--led-green);
+}
+
 /* ---------------------------------------------------------
    Now playing / transport
    --------------------------------------------------------- */
