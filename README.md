@@ -103,8 +103,8 @@ comments on `After=`, which only guarantees launch order, not readiness).
 
 If `MEDIA_SERVER_DESC_URL` isn't set at all, that's a real configuration
 error rather than something worth retrying -- the indexing screen shows it
-clearly instead of retrying forever, and `journalctl`/the console panel
-will show it too.
+clearly instead of retrying forever, and `/var/log/dlna-web.log`/the
+console panel will show it too.
 
 **The index doesn't auto-refresh.** If you add, remove, or rename files on
 the media server, the running app won't notice -- restart the service to
@@ -194,8 +194,35 @@ gunicorn instead, keep it to a single worker.
 6. **Check it's running and watch logs:**
    ```bash
    sudo systemctl status dlna-web
-   journalctl -u dlna-web -f
+   tail -f /var/log/dlna-web.log
    ```
+   The app's own output (SOAP/GENA/SSDP tracing, etc.) goes to that log
+   file now, not the journal -- see the comments above `StandardOutput=`
+   in `dlna-web.service` for why (in short: `append:` avoids a
+   long-documented bug where `file:` doesn't reliably truncate on
+   restart). `journalctl -u dlna-web -f` still shows something -- just
+   systemd's own start/stop/crash/restart messages for the unit, not the
+   app's logging.
+
+   That log file grows forever on its own; a simple logrotate config
+   keeps it in check:
+   ```
+   # /etc/logrotate.d/dlna-web
+   /var/log/dlna-web.log {
+       daily
+       rotate 7
+       compress
+       missingok
+       notifempty
+       copytruncate
+   }
+   ```
+   `copytruncate` matters here specifically: `StandardOutput=append:`
+   holds the file open for the service's entire lifetime, so a plain
+   rotate-and-reopen (the logrotate default) would leave the app writing
+   to a now-unlinked file forever until the next restart. `copytruncate`
+   copies the current content out then truncates the original in place,
+   which the still-open file descriptor tolerates correctly.
 
 It'll now start automatically on every boot and restart itself if it ever
 exits unexpectedly. To update the code later: stop the service, replace

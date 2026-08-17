@@ -39,8 +39,12 @@
 #   sudo systemctl enable --now dlna-web
 #
 # Check on it:
-#   sudo systemctl status dlna-web
-#   journalctl -u dlna-web -f
+#   sudo systemctl status dlna-web       -- is it running, basic lifecycle info
+#   tail -f /var/log/dlna-web.log        -- the app's own logging (SOAP/GENA/SSDP tracing, etc.)
+#   journalctl -u dlna-web -f            -- systemd's own start/stop/crash/restart messages
+#                                            (still useful even with output redirected to a
+#                                            file -- these come from systemd itself, not the
+#                                            app, so they show up here regardless)
 
 [Unit]
 Description=DLNA Web Controller
@@ -73,16 +77,29 @@ ExecStart=/home/pi/dlna-web/venv/bin/waitress-serve --host=0.0.0.0 --port=8080 a
 Environment=MEDIA_SERVER_DESC_URL=http://127.0.0.1:8200/rootDesc.xml
 
 # DEBUG gives verbose SOAP/GENA/SSDP tracing in the console panel and
-# journalctl -- switch to INFO once things are working reliably.
+# /var/log/dlna-web.log -- switch to INFO once things are working reliably.
 Environment=DLNA_LOG_LEVEL=INFO
 
 Restart=on-failure
 RestartSec=5
 
-# Send stdout/stderr to the systemd journal instead of a file.
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=dlna-web
+# Send stdout/stderr to a log file instead of the systemd journal.
+#
+# append: (not file:) is deliberate -- file: has a long-documented quirk
+# where it doesn't reliably truncate the file on restart, so old and new
+# output can end up mixed together in a way that's actively misleading
+# to read. append: is the well-defined choice.
+#
+# This file is created by systemd itself (running as root, before
+# dropping to the User= above) -- it works fine even though the service
+# runs unprivileged, no manual `touch`/`chown` needed. It does mean the
+# file ends up root-owned: readable by pi with normal permissions, but
+# you'd need sudo to delete or rotate it by hand. It also grows forever
+# on its own; pair this with logrotate (see README_WEB.md) if you want
+# it capped -- a daily rotation with a handful of kept copies is plenty
+# for a service this size.
+StandardOutput=append:/var/log/dlna-web.log
+StandardError=append:/var/log/dlna-web.log
 
 [Install]
 WantedBy=multi-user.target
