@@ -20,6 +20,11 @@
 # out-of-sync copy of the renderer state.
 #
 # Environment variables:
+#   MEDIA_SERVER_DESC_URL  required -- UPnP description XML URL of the
+#                          media server to use (e.g.
+#                          http://127.0.0.1:8200/rootDesc.xml). Fixed at
+#                          deploy time; there's no runtime picker for this
+#                          anymore -- see state.py's startup().
 #   DLNA_LOG_LEVEL   DEBUG / INFO / WARNING (default INFO)
 #   DLNA_WEB_PORT    port for the `python app.py` dev-server path (default 5000)
 #   DLNA_WEB_CONFIG  path to the settings JSON file (default ~/.dlna_web_config.json)
@@ -39,6 +44,26 @@ logger = logging.getLogger("webapp")
 
 app = Flask(__name__)
 
+# Routes reachable even while the library is still indexing -- everything
+# else is blocked (503) until state.library_ready, per the all-or-nothing
+# startup gate. Keep this list to exactly what the indexing screen itself
+# needs: the page shell, its static assets, and the readiness/log/stream
+# endpoints that drive its progress display.
+_READY_GATE_ALLOWLIST = {"/", "/api/library_status", "/api/logs", "/api/stream"}
+
+
+@app.before_request
+def _gate_until_library_ready():
+    if state.library_ready:
+        return None
+    path = request.path
+    if path in _READY_GATE_ALLOWLIST or path.startswith("/static/"):
+        return None
+    return jsonify({
+        "error": "Still indexing the media library -- try again shortly.",
+        "library_status": state.library_status_payload(),
+    }), 503
+
 
 # ----------------------------------------------------------------------
 # Page
@@ -47,6 +72,15 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+# ----------------------------------------------------------------------
+# Library readiness (indexing progress)
+# ----------------------------------------------------------------------
+
+@app.route("/api/library_status")
+def api_library_status():
+    return jsonify(state.library_status_payload())
 
 
 # ----------------------------------------------------------------------
@@ -78,33 +112,6 @@ def api_status():
         "queue": q_snapshot,
         "position": position,
     })
-
-
-# ----------------------------------------------------------------------
-# Media servers
-# ----------------------------------------------------------------------
-
-@app.route("/api/servers/discover")
-def api_discover_servers():
-    timeout = int(request.args.get("timeout", 3))
-    try:
-        servers = state.discover_servers(timeout=timeout)
-        return jsonify({"servers": servers})
-    except Exception as e:
-        logger.error(f"Server discovery failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/servers/select", methods=["POST"])
-def api_select_server():
-    data = request.get_json(force=True, silent=True) or {}
-    desc_url = data.get("desc_url")
-    if not desc_url:
-        return jsonify({"error": "desc_url is required"}), 400
-    ok = state.select_server(desc_url)
-    if ok:
-        return jsonify({"connected": True, "desc_url": desc_url, "friendly_name": state.browser.friendly_name})
-    return jsonify({"connected": False, "error": "Could not connect to that media server."}), 502
 
 
 # ----------------------------------------------------------------------
@@ -402,7 +409,7 @@ def create_app():
 # first imported, which is what we want here either way.
 # ----------------------------------------------------------------------
 logger.info("Initializing DLNA Web Controller...")
-state.try_reconnect_defaults()
+state.startup()
 
 
 def parse_args():

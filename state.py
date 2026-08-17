@@ -13,6 +13,7 @@
 # take the web app down with it.
 import threading
 import time
+import os
 import logging
 
 from dlnarenderer import DLNARenderer
@@ -42,6 +43,17 @@ IDLE_POSITION = {"title": "None", "duration": "00:00:00", "position": "00:00:00"
 # unavailable renderer at startup.
 RETRY_INTERVAL_SECONDS = 10.0
 
+# The media server is a fixed, deploy-time value now (not chosen at
+# runtime) -- set this once in the environment the service runs under.
+MEDIA_SERVER_ENV_VAR = "MEDIA_SERVER_DESC_URL"
+
+# Backoff for retrying the initial connection to the configured media
+# server at startup -- systemd's After= only guarantees MiniDLNA has been
+# *launched*, not that it's actually answering requests yet, so a few
+# retries here is the normal case, not an error condition.
+SERVER_RETRY_INITIAL_DELAY = 2.0
+SERVER_RETRY_MAX_DELAY = 30.0
+
 
 class AppState:
     def __init__(self):
@@ -54,6 +66,13 @@ class AppState:
         self.renderer_connected = False
         self.renderer_last_seen = None
         self.server_connected = False
+
+        # Library readiness -- all-or-nothing gate. Nothing that depends on
+        # the media server (browsing, queueing) is usable until this is
+        # True; see app.py's before_request gate.
+        self.library_ready = False
+        self.library_error = None
+        self.library_index_progress = {"folders_scanned": 0, "tracks_found": 0}
 
         self._ticker_thread = None
         self._ticker_stop = threading.Event()
@@ -100,51 +119,109 @@ class AppState:
         return True
 
     # ------------------------------------------------------------------
-    # Media server
+    # Media server -- fixed at deploy time via MEDIA_SERVER_DESC_URL, not
+    # chosen at runtime. See _connect_configured_server() below.
     # ------------------------------------------------------------------
 
-    def discover_servers(self, timeout=3):
-        urls = DLNABrowser.discover_servers(timeout=timeout)
-        results = []
-        for url in urls:
-            name = DLNABrowser.get_friendly_name(url)
-            results.append({"desc_url": url, "friendly_name": name})
-        return results
+    def library_status_payload(self):
+        """JSON-safe snapshot of library readiness -- shared by the
+        /api/library_status route and the "library_status" SSE event."""
+        return {
+            "ready": self.library_ready,
+            "error": self.library_error,
+            "progress": dict(self.library_index_progress),
+            "server": {
+                "connected": self.server_connected,
+                "friendly_name": self.browser.friendly_name if self.server_connected else None,
+                "desc_url": self.browser.desc_url,
+            },
+        }
 
-    def select_server(self, desc_url):
-        ok = self.browser.connect(desc_url)
-        self.server_connected = ok
-        events.publish("server_status", {
-            "connected": ok,
-            "desc_url": desc_url,
-            "friendly_name": self.browser.friendly_name if ok else None,
-        })
-        if ok:
-            self.config["server_desc_url"] = desc_url
-            cfgmod.save_config(self.config)
-            logger.info(f"Connected to media server: {self.browser.friendly_name} ({desc_url})")
-        else:
-            logger.warning(f"Could not connect to media server: {desc_url}")
-        return ok
+    def _connect_configured_server(self):
+        """Connects to the deploy-time-configured media server, retrying
+        with backoff until it succeeds. Runs on a background thread so
+        Flask can serve the "indexing" page immediately rather than
+        blocking startup on it. Never gives up on a transient failure --
+        the service being started before MiniDLNA has finished coming up
+        is the expected case, not an error, per systemd's After= only
+        guaranteeing launch order, not readiness."""
+        desc_url = os.environ.get(MEDIA_SERVER_ENV_VAR, "").strip()
+        if not desc_url:
+            msg = (
+                f"{MEDIA_SERVER_ENV_VAR} is not set -- configure it and restart "
+                f"the service. See dlna-web.service / README_WEB.md."
+            )
+            logger.error(msg)
+            self.library_error = msg
+            events.publish("library_status", self.library_status_payload())
+            return False
+
+        delay = SERVER_RETRY_INITIAL_DELAY
+        attempt = 0
+        while not self.server_connected:
+            attempt += 1
+            if self.browser.connect(desc_url):
+                self.server_connected = True
+                logger.info(f"Connected to configured media server: {self.browser.friendly_name} ({desc_url})")
+                events.publish("library_status", self.library_status_payload())
+                return True
+
+            logger.warning(
+                f"Media server not reachable yet (attempt {attempt}, {desc_url}). "
+                f"Retrying in {delay:.0f}s -- this is expected if it's still starting up."
+            )
+            time.sleep(delay)
+            delay = min(delay * 1.5, SERVER_RETRY_MAX_DELAY)
+
+        return True
+
+    def _warm_library_cache(self):
+        """Crawls the entire folder tree so browsing/queueing is instant
+        for the rest of the process's life (see DLNABrowser.warm_cache).
+        Sets library_ready=True when done -- the gate app.py's
+        before_request checks."""
+        logger.info("Indexing media library (this can take a minute)...")
+        t0 = time.time()
+
+        def on_progress(folders_scanned, tracks_found):
+            self.library_index_progress = {
+                "folders_scanned": folders_scanned,
+                "tracks_found": tracks_found,
+            }
+            events.publish("library_status", self.library_status_payload())
+
+        folders, tracks = self.browser.warm_cache(progress_callback=on_progress)
+        elapsed = time.time() - t0
+
+        self.library_index_progress = {"folders_scanned": folders, "tracks_found": tracks}
+        self.library_ready = True
+        logger.info(f"Library index complete: {folders} folders, {tracks} tracks in {elapsed:.1f}s. Ready.")
+        events.publish("library_status", self.library_status_payload())
+
+    def _connect_and_index_library(self):
+        """Background-thread target: connect to the configured server,
+        then crawl it. Split from startup() so it can run without
+        blocking Flask from serving the indexing page."""
+        if self._connect_configured_server():
+            self._warm_library_cache()
 
     # ------------------------------------------------------------------
-    # Startup reconnection -- never blocks, never raises
+    # Startup -- never blocks, never raises
     # ------------------------------------------------------------------
 
-    def try_reconnect_defaults(self):
-        """Called once at process startup. Attempts to reconnect to the
-        previously selected server/renderer. Neither being unavailable
-        should stop the app from starting -- the UI will just show
-        'not connected' and let the person pick (or wait for) one."""
-        server_url = self.config.get("server_desc_url")
+    def startup(self):
+        """Called once at process startup. Kicks off, all in the
+        background so Flask can start serving immediately:
+          1. The connectivity/position ticker (independent of the library)
+          2. Reconnecting to the last-used renderer, if any (unchanged
+             behavior from before -- a renderer being off at boot is
+             normal, not an error)
+          3. Connecting to the configured media server and indexing it
+             (new -- gates the rest of the UI via library_ready)
+        """
+        self._ensure_ticker()
+
         renderer_url = self.config.get("renderer_desc_url")
-
-        if server_url:
-            try:
-                self.select_server(server_url)
-            except Exception as e:
-                logger.warning(f"Could not reconnect to saved media server on startup: {e}")
-
         if renderer_url:
             try:
                 self.select_renderer(renderer_url)
@@ -156,7 +233,7 @@ class AppState:
                 )
                 self._start_deferred_renderer_retry(renderer_url)
 
-        self._ensure_ticker()
+        threading.Thread(target=self._connect_and_index_library, daemon=True).start()
 
     def _start_deferred_renderer_retry(self, desc_url):
         """A renderer that's off at boot is the normal case for this app

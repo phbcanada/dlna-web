@@ -4,11 +4,19 @@
 # as a systemd service, so it starts automatically at boot and restarts
 # itself if it ever crashes.
 #
-# --- Before installing, edit the two paths/values below to match your Pi: ---
-#   User / Group     the account that owns the project files
-#   WorkingDirectory  where you unzipped/cloned the project
-#   ExecStart         path to waitress-serve inside your venv
-#   --port            change if 5000/8080/whatever is taken on your Pi
+# --- Before installing, edit the values below to match your Pi: ---
+#   User / Group            the account that owns the project files
+#   WorkingDirectory        where you unzipped/cloned the project
+#   ExecStart               path to waitress-serve inside your venv
+#   --port                  change if 5000/8080/whatever is taken on your Pi
+#   MEDIA_SERVER_DESC_URL   your media server's UPnP description XML URL
+#                           (required -- the app won't index anything
+#                           without it). Find yours with:
+#                             curl http://<host>:<port>/rootDesc.xml
+#                           If MiniDLNA runs on this same Pi, 127.0.0.1
+#                           is the more robust choice over its LAN IP --
+#                           it survives DHCP changes and interface
+#                           switches that would otherwise break this.
 #
 # Install:
 #   sudo cp dlna-web.service /etc/systemd/system/dlna-web.service
@@ -21,11 +29,22 @@
 
 [Unit]
 Description=DLNA Web Controller
-# SSDP discovery and the GENA event callback both need a real network
-# interface up, not just systemd's notion of "networking started" --
-# network-online.target waits for that.
+# SSDP discovery and the GENA event callback (both used for renderers)
+# need a real network interface up, not just systemd's notion of
+# "networking started" -- network-online.target waits for that. The
+# media server itself no longer strictly needs this if it's on loopback
+# (see MEDIA_SERVER_DESC_URL below), but renderers are genuinely on the
+# LAN, so this is still worth keeping.
 After=network-online.target
 Wants=network-online.target
+# If MiniDLNA runs as its own systemd service on this same Pi (true for
+# the standard apt package), uncomment this so it's at least launched
+# before we start -- though note this only guarantees launch order, not
+# that it's actually answering requests yet, which is why
+# _connect_configured_server() in state.py retries with backoff rather
+# than assuming it's ready the instant this unit starts.
+#After=minidlna.service
+#Wants=minidlna.service
 
 [Service]
 Type=simple
@@ -33,6 +52,10 @@ User=pi
 Group=pi
 WorkingDirectory=/home/pi/dlna-web
 ExecStart=/home/pi/dlna-web/venv/bin/waitress-serve --host=0.0.0.0 --port=8080 app:app
+
+# Required: the media server to index and browse. No runtime picker for
+# this anymore -- it's fixed for the life of the service.
+Environment=MEDIA_SERVER_DESC_URL=http://127.0.0.1:8200/rootDesc.xml
 
 # DEBUG gives verbose SOAP/GENA/SSDP tracing in the console panel and
 # journalctl -- switch to INFO once things are working reliably.

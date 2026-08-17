@@ -5,11 +5,13 @@ existing `dlnarenderer.py` / `dlnabrowser.py` / `playqueue.py` logic. Runs as
 a small Flask service -- point a browser at it from any device on your LAN
 (phone, laptop, another Pi) and you get:
 
-- A **browse panel** for your media server's folder tree
-- A **queue panel** with click-to-play, next/prev/stop, and a live LED-style
-  progress meter
-- A **device picker** to discover and select the active media server / output
-  renderer, with settings remembered across restarts
+- A **browse panel** for your media server's folder tree, indexed at startup
+  so navigating it is instant
+- A **queue panel** with click-to-play, remove-from-queue, next/prev/stop,
+  and a live LED-style progress meter
+- A **renderer picker** to discover and select the active output device,
+  remembered across restarts. The media server itself is fixed at deploy
+  time (see "Configuration" below), not chosen at runtime
 - A **console panel** with live debug/status logging (also available at
   `GET /api/logs`)
 - Graceful handling of renderers that are only sometimes on: selecting one
@@ -17,22 +19,94 @@ a small Flask service -- point a browser at it from any device on your LAN
   when it goes offline/comes back, and the app quietly retries a
   previously-selected renderer in the background until it appears.
 
+## Configuration
+
+The media server is set once, at deploy time, via an environment variable --
+there's no in-app picker for it. This is deliberate: the app indexes the
+server's entire folder tree at startup (see "Media library indexing"
+below), so switching servers on the fly isn't a supported flow; changing it
+means editing the env var and restarting the service.
+
+```bash
+export MEDIA_SERVER_DESC_URL=http://127.0.0.1:8200/rootDesc.xml
+```
+
+This needs to be the UPnP **description XML** URL, not just a host:port --
+that document is where the app finds both the ContentDirectory control URL
+(needed to browse anything) and the server's `<friendlyName>` (shown in the
+UI), and its path isn't standardized across DLNA server software. Find
+yours with:
+
+```bash
+curl http://<host>:<port>/rootDesc.xml
+```
+
+If that returns UPnP XML with a `<friendlyName>` tag, that's your URL. For
+MiniDLNA specifically: the default path is `/rootDesc.xml`, and if it's
+running on the same machine as this app, `127.0.0.1` is worth trying even
+though MiniDLNA's docs say it excludes loopback by default -- in practice
+its HTTP listener commonly binds `0.0.0.0` regardless, so it's worth
+confirming with the `curl` above before assuming you need the LAN IP.
+Loopback is the more robust choice if it works: unlike a LAN IP, it isn't
+affected by DHCP reassignment or switching network interfaces.
+
 ## Running it
 
 ```bash
 pip install -r requirements.txt
+export MEDIA_SERVER_DESC_URL=http://127.0.0.1:8200/rootDesc.xml
 python app.py
 ```
 
-Then open `http://<pi-ip>:5000/` from any device on the same network.
+Then open `http://<pi-ip>:5000/` from any device on the same network. The
+page will show an indexing screen for a bit at first startup (see below)
+before the normal UI appears.
 
 Useful environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `MEDIA_SERVER_DESC_URL` | *(required)* | The media server's UPnP description XML URL -- see "Configuration" above |
 | `DLNA_LOG_LEVEL` | `INFO` | Set to `DEBUG` for verbose SOAP/GENA/SSDP tracing in the console panel |
 | `DLNA_WEB_PORT` | `5000` | Port to listen on |
-| `DLNA_WEB_CONFIG` | `~/.dlna_web_config.json` | Where the last-selected server/renderer are remembered |
+| `DLNA_WEB_CONFIG` | `~/.dlna_web_config.json` | Where the last-selected renderer is remembered |
+
+## Media library indexing
+
+At startup, the app connects to the configured media server and crawls its
+entire folder tree, one `Browse` call per folder -- the same lazy caching
+`browse_container()` already did as you navigated, just done eagerly upfront
+instead. Once it's done, browsing anywhere in the library is instant (no
+SOAP round-trip) for the rest of the process's life, and this is also the
+foundation a future "Queue N tracks" button on each folder will read from
+without needing any further network calls.
+
+**Until that crawl finishes, the whole app is gated** -- the page shows an
+"Indexing your library..." screen with live progress (folders scanned,
+tracks found) instead of the normal UI. This is intentional, not a bug: it
+avoids the complexity of the app being half-functional (e.g., a folder that
+looks empty because it hasn't been crawled yet, versus one that's actually
+empty). For a ~10,000-track library on a Pi talking to a same-machine
+MiniDLNA over loopback, this typically takes well under a minute, but
+scales with your library's folder count, not track count directly (a
+folder with 200 tracks costs the same one `Browse` call as a folder with 2).
+
+If the configured media server isn't reachable yet at startup (e.g.
+MiniDLNA hasn't finished starting), the app retries with backoff
+indefinitely rather than giving up -- this is the expected case when
+systemd starts things in parallel, not an error (see `dlna-web.service`'s
+comments on `After=`, which only guarantees launch order, not readiness).
+
+If `MEDIA_SERVER_DESC_URL` isn't set at all, that's a real configuration
+error rather than something worth retrying -- the indexing screen shows it
+clearly instead of retrying forever, and `journalctl`/the console panel
+will show it too.
+
+**The index doesn't auto-refresh.** If you add, remove, or rename files on
+the media server, the running app won't notice -- restart the service to
+re-crawl. There's no in-app "rescan" trigger (yet); the whole design here
+assumes a crawl-once-at-boot model, matching how infrequently a home music
+library actually changes.
 
 ## Running it as a boot-time service (recommended for the Pi)
 
@@ -62,12 +136,16 @@ gunicorn instead, keep it to a single worker.
 
 3. **Test it manually first:**
    ```bash
-   venv/bin/waitress-serve --host=0.0.0.0 --port=8080 app:app
+   MEDIA_SERVER_DESC_URL=http://127.0.0.1:8200/rootDesc.xml \
+     venv/bin/waitress-serve --host=0.0.0.0 --port=8080 app:app
    ```
    Open `http://<pi-ip>:8080/` and confirm it works, then `Ctrl+C`.
 
 4. **Edit `dlna-web.service`** to match your setup -- it defaults to user
-   `pi`, working directory `/home/pi/dlna-web`, and port `8080`.
+   `pi`, working directory `/home/pi/dlna-web`, port `8080`, and
+   `MEDIA_SERVER_DESC_URL=http://127.0.0.1:8200/rootDesc.xml`. If MiniDLNA
+   runs as its own systemd service on this Pi, also uncomment the
+   `After=`/`Wants=minidlna.service` lines.
 
 5. **Install and enable the service:**
    ```bash
@@ -92,15 +170,17 @@ the files, `sudo systemctl start dlna-web`.
   diagnostics go through `logging` instead of `print()`, and the interactive
   `input()`-driven selection flows now have non-interactive equivalents
   (`resolve_control_url()` was already non-interactive; `DLNABrowser.connect()`
-  is new) that the web layer calls directly. The CLI (`controller.py`,
+  is new) that the web layer calls directly. `DLNABrowser.warm_cache()` is
+  new too -- the startup crawl described above. The CLI (`controller.py`,
   `main.py`) still works unmodified if you want it -- both entry points share
   the same underlying modules.
 - `playqueue.py`: unchanged behavior, but every mutation now publishes an
   event (`queue_status`, `now_playing`) so connected browser tabs update
   live via Server-Sent Events instead of polling.
 - New files: `app.py` (routes), `state.py` (the renderer/browser/queue
-  singleton + connectivity monitor), `events.py` (pub/sub for SSE),
-  `logging_setup.py`, `config.py`, `templates/index.html`, `static/*`.
+  singleton + connectivity monitor + startup/indexing orchestration),
+  `events.py` (pub/sub for SSE), `logging_setup.py`, `config.py`,
+  `templates/index.html`, `static/*`.
 
 ## Architecture notes
 
@@ -117,16 +197,26 @@ the files, `sudo systemctl start dlna-web`.
   Playback commands (`play_uri`, `pause`, `stop`) all return `True`/`False`
   now instead of assuming success, so a failed command shows up as a log
   warning + a toast rather than silently doing nothing.
-- **SSDP/GENA still need real LAN access.** As discussed before writing any
-  code: run this directly on the Pi's host network (no Docker NAT) since
-  both discovery (SSDP multicast) and the GENA event callback need a real
-  routable local IP.
+- **Media server availability.** Unlike the renderer, the configured media
+  server isn't optional -- the whole app is gated behind successfully
+  connecting to and indexing it (see "Media library indexing" above), with
+  indefinite retry-with-backoff for the connection itself.
+- **SSDP/GENA still need real LAN access** (for renderers). As discussed
+  before writing any code: run this directly on the Pi's host network (no
+  Docker NAT) since both discovery (SSDP multicast) and the GENA event
+  callback need a real routable local IP.
 
 ## Known limitations / good next additions
 
-- No per-track "remove from queue" yet (the original `PlayQueue` didn't
-  have one either) -- straightforward to add if useful: a `remove_at(index)`
-  method plus a small DELETE route.
+- **No live library rescan.** As noted above, changes to the media
+  server's files require restarting the service. A "Rescan" trigger
+  (re-running `warm_cache()` on demand rather than only at startup) would
+  be a natural addition if the library changes often enough for that to
+  matter.
+- **"Queue N tracks" per folder** is planned but not yet built -- the
+  indexing/caching this turn is specifically the groundwork for it
+  (reading track counts straight from `DLNABrowser.cache` once it's
+  warmed, no extra network calls needed).
 - `PlayQueue.shutdown()` (called when switching renderers) stops the polling
   loop but doesn't cleanly tear down a running GENA HTTP listener thread --
   harmless on a Pi that switches renderers rarely, but worth hardening if

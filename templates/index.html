@@ -8,6 +8,20 @@
 </head>
 <body>
 
+<!-- ============================================================ -->
+<!-- Indexing overlay: shown until the library finishes its        -->
+<!-- startup crawl (state.library_ready). Covers the whole app --  -->
+<!-- nothing underneath is usable until this is hidden.            -->
+<!-- ============================================================ -->
+<div class="indexing-overlay" id="indexing-overlay">
+  <div class="indexing-card">
+    <div class="indexing-spinner" id="indexing-spinner"></div>
+    <div class="indexing-title" id="indexing-title">Indexing your library&hellip;</div>
+    <div class="indexing-detail" id="indexing-detail">Connecting to the media server&hellip;</div>
+    <div class="indexing-progress" id="indexing-progress"></div>
+  </div>
+</div>
+
 <div class="rack">
 
   <!-- ============================================================ -->
@@ -20,7 +34,7 @@
     </div>
 
     <div class="device-chips">
-      <div class="chip" id="server-chip" data-kind="server">
+      <div class="chip chip-static" id="server-chip" data-kind="server" title="Configured at deploy time">
         <span class="led" id="server-led"></span>
         <span class="chip-label">MEDIA SERVER</span>
         <span class="chip-value" id="server-value">Not connected</span>

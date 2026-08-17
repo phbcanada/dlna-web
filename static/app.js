@@ -147,13 +147,11 @@ function setConsoleHeight(px) {
 })();
 
 // ---------------------------------------------------------------------
-// Device chips + picker dropdown
+// Renderer picker dropdown -- the media server is fixed at deploy time
+// (see the static "MEDIA SERVER" chip above), so this is renderer-only.
 // ---------------------------------------------------------------------
-let pickerKind = null; // "server" | "renderer"
-
-function openPicker(kind) {
-  pickerKind = kind;
-  el("picker-title").textContent = kind === "server" ? "Media servers" : "Renderers";
+function openPicker() {
+  el("picker-title").textContent = "Renderers";
   el("device-picker").classList.remove("hidden");
   el("picker-manual-url").value = "";
   rescanPicker();
@@ -161,11 +159,9 @@ function openPicker(kind) {
 
 function closePicker() {
   el("device-picker").classList.add("hidden");
-  pickerKind = null;
 }
 
-el("server-chip").addEventListener("click", () => openPicker("server"));
-el("renderer-chip").addEventListener("click", () => openPicker("renderer"));
+el("renderer-chip").addEventListener("click", () => openPicker());
 el("picker-close").addEventListener("click", closePicker);
 el("picker-rescan").addEventListener("click", rescanPicker);
 
@@ -173,9 +169,8 @@ async function rescanPicker() {
   const list = el("picker-list");
   list.innerHTML = `<div class="picker-empty">Scanning\u2026</div>`;
   try {
-    const path = pickerKind === "server" ? "/api/servers/discover" : "/api/renderers/discover";
-    const data = await apiGet(path);
-    const items = pickerKind === "server" ? data.servers : data.renderers;
+    const data = await apiGet("/api/renderers/discover");
+    const items = data.renderers;
     if (!items || items.length === 0) {
       list.innerHTML = `<div class="picker-empty">Nothing found on the network. Devices that are asleep or powered off won't appear -- try again once it's on, or paste its URL below.</div>`;
       return;
@@ -188,7 +183,7 @@ async function rescanPicker() {
       row.innerHTML = `<span class="name"></span><span class="url"></span>`;
       row.querySelector(".name").textContent = name;
       row.querySelector(".url").textContent = item.desc_url;
-      row.addEventListener("click", () => selectDevice(item.desc_url));
+      row.addEventListener("click", () => selectRenderer(item.desc_url));
       list.appendChild(row);
     });
   } catch (e) {
@@ -198,21 +193,14 @@ async function rescanPicker() {
 
 el("picker-manual-go").addEventListener("click", () => {
   const url = el("picker-manual-url").value.trim();
-  if (url) selectDevice(url);
+  if (url) selectRenderer(url);
 });
 
-async function selectDevice(descUrl) {
-  const kind = pickerKind;
+async function selectRenderer(descUrl) {
   try {
-    if (kind === "server") {
-      await apiPost("/api/servers/select", { desc_url: descUrl });
-      toast("Connected to media server.");
-      await refreshBrowse();
-    } else {
-      await apiPost("/api/renderers/select", { desc_url: descUrl });
-      toast("Connected to renderer.");
-      await refreshQueue();
-    }
+    await apiPost("/api/renderers/select", { desc_url: descUrl });
+    toast("Connected to renderer.");
+    await refreshQueue();
     closePicker();
     await refreshStatus();
   } catch (e) {
@@ -585,16 +573,9 @@ function connectStream() {
           !payload.data.connected
         );
         break;
-      case "server_status":
-        {
-          const label = payload.data.connected
-            ? ((payload.data.friendly_name && payload.data.friendly_name !== "None")
-                ? payload.data.friendly_name
-                : new URL(payload.data.desc_url).hostname)
-            : "Not connected";
-          setChip("server", payload.data.connected, label);
-        }
-        if (payload.data.connected) refreshBrowse();
+      case "library_status":
+        applyLibraryStatus(payload.data);
+        if (payload.data.ready) revealApp();
         break;
       default:
         break;
@@ -607,7 +588,112 @@ function connectStream() {
   };
   src.onopen = () => {
     el("console-hint").textContent = "";
+    // Resync immediately on every (re)connection, not just the first one.
+    // If the backend process was restarted while this tab was open, this
+    // is what catches it even in the worst case -- the reconnect landing
+    // *after* the new process already finished indexing, so no "not
+    // ready"/"ready" events were ever seen by this tab to trigger a
+    // reveal in the first place. checkLibraryStatus() is a harmless
+    // no-op if nothing has actually changed.
+    checkLibraryStatus();
   };
+}
+
+// ---------------------------------------------------------------------
+// Indexing overlay -- shown until the startup library crawl finishes
+// (state.library_ready on the backend). Driven by an initial fetch plus
+// live "library_status" SSE events, with a polling fallback in case the
+// stream is slow to connect or an event gets missed.
+// ---------------------------------------------------------------------
+let libraryRevealed = false;
+let libraryPollTimer = null;
+
+function applyLibraryStatus(data) {
+  const overlay = el("indexing-overlay");
+  const card = overlay.querySelector(".indexing-card");
+
+  const srv = data.server || {};
+  if (srv.connected) {
+    const label = (srv.friendly_name && srv.friendly_name !== "None")
+      ? srv.friendly_name
+      : (srv.desc_url ? new URL(srv.desc_url).hostname : "Connected");
+    setChip("server", true, label);
+  } else {
+    setChip("server", false, "Not connected");
+  }
+
+  if (data.ready) {
+    // Deliberately NOT hiding the overlay here -- revealApp() does that,
+    // and only after the real content (refreshStatus/refreshBrowse) has
+    // actually finished loading. Hiding it eagerly here would create a
+    // brief window with the overlay gone but the browse panel still
+    // empty, since those calls are async and haven't resolved yet.
+    return;
+  }
+
+  // The backend is (re)indexing -- e.g. it just restarted while this tab
+  // was already open and revealed. Un-latch so a subsequent "ready"
+  // signal can properly re-trigger revealApp() instead of being silently
+  // dropped by its one-shot guard, and make sure the poll fallback is
+  // running in case the live SSE "ready" event lands before this tab's
+  // stream reconnects (missing it entirely).
+  libraryRevealed = false;
+  startLibraryStatusPolling();
+
+  overlay.classList.remove("hidden");
+
+  if (data.error) {
+    card.classList.add("error");
+    el("indexing-title").textContent = "Configuration problem";
+    el("indexing-detail").textContent = data.error;
+    el("indexing-progress").textContent = "";
+    return;
+  }
+
+  card.classList.remove("error");
+  if (srv.connected) {
+    el("indexing-title").textContent = "Indexing your library\u2026";
+    el("indexing-detail").textContent = `Reading ${srv.friendly_name || "the media server"}\u2019s folder tree\u2026`;
+    const p = data.progress || {};
+    el("indexing-progress").textContent =
+      `${p.folders_scanned || 0} folders scanned, ${p.tracks_found || 0} tracks found`;
+  } else {
+    el("indexing-title").textContent = "Starting up\u2026";
+    el("indexing-detail").textContent = "Connecting to the media server\u2026";
+    el("indexing-progress").textContent = "";
+  }
+}
+
+async function checkLibraryStatus() {
+  try {
+    const data = await apiGet("/api/library_status");
+    applyLibraryStatus(data);
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function revealApp() {
+  if (libraryRevealed) return;
+  libraryRevealed = true;
+  if (libraryPollTimer) {
+    clearInterval(libraryPollTimer);
+    libraryPollTimer = null;
+  }
+  await refreshStatus();
+  await refreshBrowse();
+  // Only now -- content is actually loaded, so there's no gap between
+  // the overlay disappearing and the real browse panel appearing.
+  el("indexing-overlay").classList.add("hidden");
+}
+
+function startLibraryStatusPolling() {
+  if (libraryPollTimer) return;
+  libraryPollTimer = setInterval(async () => {
+    const data = await checkLibraryStatus();
+    if (data && data.ready) await revealApp();
+  }, 1500);
 }
 
 // ---------------------------------------------------------------------
@@ -620,7 +706,16 @@ function connectStream() {
     (logsData.logs || []).forEach(appendLogLine);
   } catch (e) { /* ignore */ }
 
-  await refreshStatus();
-  await refreshBrowse();
+  // Safe to open immediately: /api/stream is reachable even while the
+  // library is still indexing, so the console shows live crawl progress
+  // and the "library_status" event can reveal the app as soon as it's
+  // ready without waiting on the poll interval below.
   connectStream();
+
+  const initial = await checkLibraryStatus();
+  if (initial && initial.ready) {
+    await revealApp();
+  } else {
+    startLibraryStatusPolling();
+  }
 })();

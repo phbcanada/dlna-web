@@ -276,6 +276,57 @@ class DLNABrowser:
             logger.warning(f"Browse error on container '{container_id}' (media server may be offline): {e}")
             return []
 
+    def warm_cache(self, progress_callback=None, progress_every=10):
+        """Recursively walks the entire folder tree from the root, browsing
+        every container so its contents land in self.cache -- the exact
+        same cache browse_container() already checks first, so this is
+        purely "do the lazy-loading work upfront" rather than a separate
+        cache mechanism. After this runs, browsing anywhere in the tree
+        is instant (no SOAP round-trip) for the rest of the process's life.
+
+        Deliberately sequential, not parallel: many DLNA servers (MiniDLNA
+        especially) are a single modest daemon that doesn't handle
+        concurrent Browse requests gracefully, so a firehose of parallel
+        requests risks queuing delays or timeouts that would eat back any
+        speed gained from parallelism -- one at a time is the safer default.
+
+        progress_callback(folders_scanned, tracks_found), if given, is
+        called periodically (every `progress_every` folders, plus always
+        once at the end) so a caller can report live progress without
+        it firing so often it floods whatever it's reporting to (e.g. an
+        SSE stream).
+
+        Returns (folders_scanned, tracks_found).
+        """
+        folders_scanned = 0
+        tracks_found = 0
+        to_visit = [self.current_id]
+        visited = set()
+
+        while to_visit:
+            container_id = to_visit.pop(0)
+            if container_id in visited:
+                continue
+            visited.add(container_id)
+
+            items = self.browse_container(container_id)
+            folders_scanned += 1
+
+            for item_type, data in items:
+                if item_type == "folder":
+                    to_visit.append(data["id"])
+                else:
+                    tracks_found += 1
+
+            if progress_callback and (folders_scanned % progress_every == 0):
+                progress_callback(folders_scanned, tracks_found)
+
+        if progress_callback:
+            progress_callback(folders_scanned, tracks_found)
+
+        logger.info(f"Library crawl complete: {folders_scanned} folders, {tracks_found} tracks cached.")
+        return folders_scanned, tracks_found
+
     def _get_relative_path(self, item_title, item_uri):
         """Reconstructs the real relative file path from browser history breadcrumbs."""
         ignore_nodes = ("root", "music", "folders", "audio")

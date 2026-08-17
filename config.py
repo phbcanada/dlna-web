@@ -1,8 +1,10 @@
 # config.py
 #
-# Tiny JSON-backed settings store. All this needs to remember is which
-# media server and renderer to reconnect to on the next boot -- everything
-# else (play queue, playlists) already has its own storage.
+# Tiny JSON-backed settings store. The media server is now a fixed,
+# deploy-time value (MEDIA_SERVER_DESC_URL env var, read directly in
+# state.py) rather than something picked at runtime, so the only thing
+# left worth remembering here is which renderer to reconnect to on the
+# next boot.
 import json
 import os
 import logging
@@ -14,7 +16,6 @@ CONFIG_PATH = os.environ.get(
 )
 
 DEFAULTS = {
-    "server_desc_url": None,
     "renderer_desc_url": None,
 }
 

@@ -130,6 +130,17 @@ input {
   background: var(--panel-alt);
 }
 
+/* Media server chip is now a fixed, deploy-time value with no picker
+   behind it -- override the interactive styling so it doesn't look
+   clickable. */
+.chip-static {
+  cursor: default;
+}
+.chip-static:hover {
+  border-color: var(--border);
+  background: var(--panel);
+}
+
 .chip-label {
   color: var(--text-dim);
   letter-spacing: 0.08em;
@@ -690,4 +701,76 @@ button:focus-visible, input:focus-visible, .row:focus-visible, .chip:focus-visib
 
 @media (prefers-reduced-motion: reduce) {
   .led.pulse, .toast { animation: none; }
+}
+
+/* ---------------------------------------------------------
+   Indexing overlay -- shown until the startup library crawl
+   finishes. Covers the whole app; nothing underneath is usable
+   while this is visible.
+   --------------------------------------------------------- */
+.indexing-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-casing);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+}
+.indexing-overlay.hidden { display: none; }
+
+.indexing-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 40px 48px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 420px;
+  text-align: center;
+}
+
+.indexing-card.error .indexing-spinner {
+  animation: none;
+  border-top-color: var(--led-red);
+  border-right-color: var(--led-red);
+}
+
+.indexing-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--led-green);
+  border-right-color: var(--led-green);
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.indexing-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.indexing-detail {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.indexing-progress {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--led-green);
+  min-height: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indexing-spinner { animation: none; }
 }
