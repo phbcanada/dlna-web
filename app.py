@@ -441,6 +441,19 @@ def api_queue_clear():
     return jsonify(state.queue.snapshot())
 
 
+@app.route("/api/queue/shuffle", methods=["POST"])
+def api_queue_shuffle():
+    err = _require_queue()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = data.get("enabled")
+    if enabled is None:
+        return jsonify({"error": "enabled is required"}), 400
+    state.queue.set_shuffle(bool(enabled))
+    return jsonify(state.queue.snapshot())
+
+
 # ----------------------------------------------------------------------
 # Playlists
 # ----------------------------------------------------------------------

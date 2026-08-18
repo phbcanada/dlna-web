@@ -536,6 +536,14 @@ input {
   background: var(--panel-raised);
 }
 
+/* Shuffle toggle -- lit up green (same accent as everything else
+   "active" in this UI) while enabled, otherwise looks like any other
+   transport button. */
+.btn-transport.active {
+  background: var(--led-green-dim);
+  border-color: var(--led-green);
+}
+
 .transport-state {
   margin-left: auto;
   font-family: var(--font-mono);

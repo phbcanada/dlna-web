@@ -31,6 +31,7 @@ import threading
 import time
 import os
 import logging
+import random
 
 import requests
 import socket
@@ -141,6 +142,23 @@ class PlayQueue:
         # GENA (falls back to polling) because the port is still taken.
         self.gena_server = None
 
+        # Shuffle: deliberately does NOT reorder self.queue itself -- the
+        # displayed queue, playlist saves, and remove_at()'s index
+        # bookkeeping all assume a stable list. Instead it only changes
+        # what next()/prev() pick: shuffle_history tracks which indices
+        # have already been "current" this shuffle session (in the order
+        # they were played), and next() randomly picks from whatever's
+        # left. No auto-loop -- once everything's been played, next()
+        # stops, same as linear playback reaching the end of the queue.
+        self.shuffle_enabled = False
+        self.shuffle_history = []
+        # True right after a full shuffle pass finishes (all tracks
+        # played, history cleared) until the next navigation action.
+        # play() consults this to start a genuinely fresh shuffle pass
+        # (a new random pick) instead of just replaying whatever track
+        # happened to be current when the pass ended.
+        self.shuffle_exhausted = False
+
     # ------------------------------------------------------------------
     # Web-facing helpers
     # ------------------------------------------------------------------
@@ -155,17 +173,55 @@ class PlayQueue:
                     for t in self.queue
                 ],
                 "current_idx": self.current_idx,
+                "shuffle": self.shuffle_enabled,
             }
 
     def _publish_queue_status(self):
         events.publish("queue_status", self.snapshot())
+
+    def set_shuffle(self, enabled):
+        """Turns shuffle on/off. Always starts a fresh shuffle_history --
+        re-enabling shuffle later in the same session doesn't resume a
+        stale partial history from before, it starts over, which matches
+        how shuffle behaves in most media players."""
+        with self.lock:
+            self.shuffle_enabled = bool(enabled)
+            self.shuffle_history = []
+            self.shuffle_exhausted = False
+            logger.info(f"Shuffle {'enabled' if self.shuffle_enabled else 'disabled'}.")
+        self._publish_queue_status()
+
+    def _mark_played_for_shuffle(self, idx):
+        """Caller must hold self.lock. Records idx as "already played"
+        this shuffle session -- called whenever current_idx is about to
+        move away from it, whether via next(), a manual play_at(), or
+        the natural end-of-track auto-advance (which also just calls
+        next()). Only meaningful while shuffle is on."""
+        if self.shuffle_enabled and 0 <= idx < len(self.queue):
+            self.shuffle_history.append(idx)
+
+    def _reindex_shuffle_history_after_removal(self, removed_index):
+        """Caller must hold self.lock. Keeps shuffle_history's positional
+        indices valid after a track at removed_index is deleted --
+        mirrors the same index-shifting current_idx already gets in
+        remove_at(): an entry pointing at the removed track is dropped
+        (it no longer exists to be "played" or "not played"), everything
+        after it shifts down by one, entries before it are untouched."""
+        self.shuffle_history = [
+            (h - 1 if h > removed_index else h)
+            for h in self.shuffle_history
+            if h != removed_index
+        ]
 
     def play_at(self, index):
         """Jumps directly to a specific queue position and plays it --
         used when the user clicks a track in the queue panel."""
         ok = False
         with self.lock:
+            self.shuffle_exhausted = False
             if 0 <= index < len(self.queue):
+                if index != self.current_idx:
+                    self._mark_played_for_shuffle(self.current_idx)
                 self.current_idx = index
                 self._play_current()
                 ok = True
@@ -188,6 +244,7 @@ class PlayQueue:
             removing_current = (index == self.current_idx)
             removed = self.queue.pop(index)
             logger.info(f"Removed from queue: {removed.get('title', 'Unknown')}")
+            self._reindex_shuffle_history_after_removal(index)
 
             if not self.queue:
                 self.current_idx = -1
@@ -414,7 +471,15 @@ class PlayQueue:
             if not self.queue:
                 logger.info("Play requested but queue is empty.")
                 return
-            if self.current_idx == -1:
+            if self.shuffle_enabled and self.shuffle_exhausted:
+                # A full shuffle pass just finished (see _shuffle_next()).
+                # Start a genuinely fresh pass -- a new random pick --
+                # rather than just replaying whatever track happened to
+                # be current when the pass ended.
+                self.shuffle_exhausted = False
+                self.current_idx = random.choice(range(len(self.queue)))
+                logger.info("Shuffle: starting a fresh pass.")
+            elif self.current_idx == -1:
                 self.current_idx = 0
             self._play_current()
         self._publish_queue_status()
@@ -451,7 +516,18 @@ class PlayQueue:
 
     def next(self):
         with self.lock:
-            if self.current_idx + 1 < len(self.queue):
+            if self.shuffle_enabled:
+                if self.shuffle_exhausted:
+                    # This pass already finished (see _shuffle_next()).
+                    # Deliberately stays a no-op here -- only an explicit
+                    # Play starts a fresh pass (see play()). If Next also
+                    # silently restarted it, repeatedly clicking Next
+                    # would function as an implicit auto-loop, which is
+                    # specifically not wanted.
+                    logger.info("Shuffle: this pass is finished -- press Play to start a fresh one.")
+                else:
+                    self._shuffle_next()
+            elif self.current_idx + 1 < len(self.queue):
                 self.current_idx += 1
                 self._play_current()
             else:
@@ -459,9 +535,38 @@ class PlayQueue:
                 self.stop()
         self._publish_queue_status()
 
+    def _shuffle_next(self):
+        """Caller must hold self.lock. Marks the current track as played,
+        then randomly picks one of whatever's left. Once everything has
+        been played, stops (no auto-loop, matching linear next()'s
+        end-of-queue behavior), clears shuffle_history, and sets
+        shuffle_exhausted -- see play()'s check, the only thing that
+        clears that flag and starts a fresh pass."""
+        self._mark_played_for_shuffle(self.current_idx)
+        remaining = [i for i in range(len(self.queue)) if i not in self.shuffle_history]
+        if not remaining:
+            logger.info("Shuffle: all tracks in the queue have been played.")
+            self.shuffle_history = []
+            self.shuffle_exhausted = True
+            self.stop()
+            return
+        self.current_idx = random.choice(remaining)
+        self._play_current()
+
     def prev(self):
         with self.lock:
-            if self.current_idx > 0:
+            if self.shuffle_enabled:
+                if self.shuffle_history:
+                    self.current_idx = self.shuffle_history.pop()
+                    self._play_current()
+                else:
+                    # Empty history covers both "nothing played yet" and
+                    # "a pass just finished" (shuffle_history is cleared
+                    # on exhaustion) -- correctly a no-op either way, and
+                    # deliberately doesn't touch shuffle_exhausted so a
+                    # follow-up Play still starts a fresh pass correctly.
+                    logger.info("No earlier shuffle history to go back to.")
+            elif self.current_idx > 0:
                 self.current_idx -= 1
                 self._play_current()
             else:
@@ -473,6 +578,8 @@ class PlayQueue:
             self.stop()
             self.queue.clear()
             self.current_idx = -1
+            self.shuffle_history = []
+            self.shuffle_exhausted = False
             logger.info("Queue cleared.")
         self._publish_queue_status()
 

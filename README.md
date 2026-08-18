@@ -11,7 +11,8 @@ a small Flask service -- point a browser at it from any device on your LAN
   a folder at once (capped at `QUEUE_TRACK_LIMIT` tracks -- see "Queue size
   limit" below)
 - A **queue panel** with click-to-play, remove-from-queue, next/prev/stop,
-  and a live LED-style progress meter
+  a shuffle toggle (see "Shuffle" below), a live LED-style progress meter,
+  and auto-scroll that keeps the currently-playing track in view
 - A **renderer picker** to discover and select the active output device,
   remembered across restarts. The media server itself is fixed at deploy
   time (see "Configuration" below), not chosen at runtime
@@ -144,6 +145,45 @@ to just the real folder tree. That's a legitimate alternative to raising
 or removing this cap, but not a substitute for it -- the cap protects
 against *any* oversized folder, from any server, for any reason, not just
 MiniDLNA's specific default views.
+
+## Shuffle
+
+Deliberately does **not** reorder the queue itself -- the displayed list,
+what "Queue All" would save, and `remove_at()`'s index bookkeeping all
+assume a stable, insertion-ordered list, so shuffle only changes what
+Next/Previous actually pick, not what's shown. Turning shuffle off is
+therefore instant and exact: nothing was touched, so there's nothing to
+restore.
+
+Implementation is a played-tracks history (`PlayQueue.shuffle_history`),
+not a precomputed shuffled order -- Next marks the current track played
+and randomly picks one of whatever's left; Previous retraces that same
+history backwards (real "go back to what I actually just heard", not
+"undo the last random pick"); manually clicking a track in the queue
+panel also marks whatever you were on as played, so shuffle won't hand
+it back to you later in the same session. No auto-loop: once everything
+in the queue has been played, Next stops, the same as linear playback
+reaching the end of the queue.
+
+Turning shuffle on or off always starts a fresh history -- re-enabling it
+later in the same session doesn't resume a stale partial shuffle from
+before. Removing a track from the queue reindexes `shuffle_history` the
+same way `remove_at()` already reindexes `current_idx`, so deleting an
+unrelated track can't corrupt what's still considered "already played."
+
+**When a full pass finishes**, playback stops (as above) and
+`shuffle_history` is cleared immediately -- but pressing **Next** again
+stays deliberately inert (logs "this pass is finished," nothing else
+happens) rather than silently starting over. Only pressing **Play**
+starts a genuinely fresh pass, picking a new random starting track. This
+split matters: if bare Next also restarted things, repeatedly clicking it
+would function as an implicit auto-loop, which this feature specifically
+does not do. `PlayQueue.shuffle_exhausted` is the flag behind this --
+set the moment a pass completes, cleared by `play()` (starts fresh),
+`play_at()` (a manual pick is its own explicit re-engagement), toggling
+shuffle, or clearing the queue -- but deliberately *not* by `next()`/
+`prev()` themselves, since a no-op Next/Previous while already exhausted
+shouldn't erase the flag a follow-up Play still needs to see.
 
 ## Running it as a boot-time service (recommended for the Pi)
 

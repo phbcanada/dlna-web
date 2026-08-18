@@ -409,10 +409,14 @@ el("add-folder-btn").addEventListener("click", async () => {
 function renderQueue(snapshot) {
   const list = el("queue-list");
   list.innerHTML = "";
+  // Independent of whether the queue itself is empty, so this must run
+  // before the early-return below.
+  el("shuffle-btn").classList.toggle("active", !!snapshot.shuffle);
   if (!snapshot.queue || snapshot.queue.length === 0) {
     list.innerHTML = `<div class="list-empty">Queue is empty. Browse and click "+ Queue" to add tracks.</div>`;
     return;
   }
+  let activeRow = null;
   snapshot.queue.forEach((track, idx) => {
     const row = document.createElement("div");
     row.className = "row queue-row" + (idx === snapshot.current_idx ? " active" : "");
@@ -429,7 +433,17 @@ function renderQueue(snapshot) {
       removeFromQueue(idx);
     });
     list.appendChild(row);
+    if (idx === snapshot.current_idx) {
+      activeRow = row;
+    }
   });
+
+  if (activeRow) {
+    // block: "nearest" is a no-op if the row is already fully visible --
+    // safe to call on every render rather than only when the current
+    // track actually changed, no manual visibility check needed.
+    activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
 }
 
 async function removeFromQueue(idx) {
@@ -474,6 +488,19 @@ el("prev-btn").addEventListener("click", () => apiPost("/api/queue/prev").catch(
 el("next-btn").addEventListener("click", () => apiPost("/api/queue/next").catch((e) => toast(e.message, true)));
 el("stop-btn").addEventListener("click", () => apiPost("/api/queue/stop").catch((e) => toast(e.message, true)));
 el("playpause-btn").addEventListener("click", () => apiPost("/api/queue/toggle").catch((e) => toast(e.message, true)));
+
+el("shuffle-btn").addEventListener("click", async () => {
+  const currentlyEnabled = el("shuffle-btn").classList.contains("active");
+  try {
+    // Render immediately from the response, same pattern as playAt/
+    // removeFromQueue, so the button's state flips the instant the
+    // click registers rather than waiting on the SSE round-trip.
+    const data = await apiPost("/api/queue/shuffle", { enabled: !currentlyEnabled });
+    renderQueue(data);
+  } catch (e) {
+    toast(`Could not toggle shuffle: ${e.message}`, true);
+  }
+});
 
 // ---------------------------------------------------------------------
 // Playback tick (position, duration, LED bar, transport state)
