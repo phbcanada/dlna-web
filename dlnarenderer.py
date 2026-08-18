@@ -41,12 +41,20 @@ class DLNARenderer:
     NS_SOAP = "http://schemas.xmlsoap.org/soap/envelope/"
     NS_AVT = "urn:schemas-upnp-org:service:AVTransport:1"
     NS_CM = "urn:schemas-upnp-org:service:ConnectionManager:1"
+    NS_RC = "urn:schemas-upnp-org:service:RenderingControl:1"
 
     def __init__(self):
         self.desc_url = None
         self.control_url = None
         self.friendly_name = "None"
         self.connection_manager_control_url = None
+        # None until resolve_control_url() finds a RenderingControl
+        # service entry -- and even then, having a control URL only means
+        # the service is *advertised*. Some renderers implement it but
+        # reject the actual volume actions (see get_volume()'s docstring),
+        # so this alone isn't the volume-support signal; get_volume()
+        # returning a real value is.
+        self.rendering_control_url = None
         # Captured for potential future use -- NOT currently used for any
         # compatibility filtering/gating decision. Real-world renderers
         # are inconsistent enough about accurately reporting this
@@ -172,6 +180,11 @@ class DLNARenderer:
                 cm_control_node = service.find('upnp:controlURL', ns)
                 if cm_control_node is not None and cm_control_node.text:
                     self.connection_manager_control_url = urljoin(desc_url, cm_control_node.text)
+
+            if "RenderingControl:1" in service_type:
+                rc_control_node = service.find('upnp:controlURL', ns)
+                if rc_control_node is not None and rc_control_node.text:
+                    self.rendering_control_url = urljoin(desc_url, rc_control_node.text)
 
         if avtransport_found:
             if self.connection_manager_control_url:
@@ -392,6 +405,79 @@ class DLNARenderer:
         except Exception as e:
             logger.debug(f"get_position_info failed (renderer likely offline): {e}")
             return {"title": "None", "duration": "00:00:00", "position": "00:00:00"}
+
+    # -- RenderingControl (volume) --------------------------------------
+    #
+    # Not every renderer implements this the same way AVTransport is
+    # implemented practically everywhere: some skip RenderingControl
+    # entirely, and at least one real-world device tested against this
+    # app (an LG WebOS TV) implements the service but deliberately
+    # rejects the volume actions with UPnPError 606 "Action not
+    # authorized" -- a vendor policy choice, not a bug on either end.
+    #
+    # There's no separate "do you support this" query in the UPnP spec,
+    # so get_volume() returning None doubles as both "unreachable" and
+    # "not supported" -- callers (state.py) treat both the same way:
+    # no volume control for this renderer, not an error to surface.
+
+    def get_volume(self, channel="Master"):
+        """Returns current volume 0-100, or None if unsupported/unreachable."""
+        if not self.rendering_control_url:
+            return None
+        soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="{self.NS_SOAP}">
+  <s:Body>
+    <u:GetVolume xmlns:u="{self.NS_RC}">
+      <InstanceID>0</InstanceID>
+      <Channel>{channel}</Channel>
+    </u:GetVolume>
+  </s:Body>
+</s:Envelope>"""
+        headers = {
+            "Content-Type": 'text/xml; charset="utf-8"',
+            "SOAPACTION": f'"{self.NS_RC}#GetVolume"',
+            "Connection": "close"
+        }
+        try:
+            r = requests.post(self.rendering_control_url, data=soap, headers=headers, timeout=3)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            vol_node = root.find(".//CurrentVolume")
+            if vol_node is not None and vol_node.text is not None:
+                return int(vol_node.text)
+        except Exception as e:
+            logger.debug(f"get_volume failed (renderer may not support volume control): {e}")
+        return None
+
+    def set_volume(self, value, channel="Master"):
+        """Sets volume 0-100 (clamped). Returns True/False -- same pattern
+        as _send_command; a rejected or failed call is an expected
+        outcome here, not an exceptional one."""
+        if not self.rendering_control_url:
+            return False
+        value = max(0, min(100, int(value)))
+        soap = f"""<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="{self.NS_SOAP}">
+  <s:Body>
+    <u:SetVolume xmlns:u="{self.NS_RC}">
+      <InstanceID>0</InstanceID>
+      <Channel>{channel}</Channel>
+      <DesiredVolume>{value}</DesiredVolume>
+    </u:SetVolume>
+  </s:Body>
+</s:Envelope>"""
+        headers = {
+            "Content-Type": 'text/xml; charset="utf-8"',
+            "SOAPACTION": f'"{self.NS_RC}#SetVolume"',
+            "Connection": "close"
+        }
+        try:
+            r = requests.post(self.rendering_control_url, data=soap, headers=headers, timeout=3)
+            r.raise_for_status()
+            return True
+        except Exception as e:
+            logger.debug(f"set_volume failed (renderer may not support volume control): {e}")
+            return False
 
     def _send_command(self, action, soap_payload):
         headers = {

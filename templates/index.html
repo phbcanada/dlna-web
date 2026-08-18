@@ -122,6 +122,11 @@
         <button class="btn-transport" id="stop-btn" title="Stop">⏹</button>
         <button class="btn-transport" id="next-btn" title="Next">⏭</button>
         <button class="btn-transport" id="shuffle-btn" title="Shuffle">🔀</button>
+        <div class="volume-control" id="volume-control" title="Volume">
+          <span class="volume-icon">🔊</span>
+          <input type="range" id="volume-slider" class="volume-slider" min="0" max="100" value="0" disabled>
+          <span class="volume-value" id="volume-value">--</span>
+        </div>
         <span class="transport-state" id="transport-state">STOPPED</span>
       </div>
 

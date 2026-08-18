@@ -82,6 +82,13 @@ class AppState:
         self.renderer_last_seen = None
         self.server_connected = False
 
+        # Per-renderer volume capability + current value. Re-probed once,
+        # in select_renderer() -> _refresh_volume_capability(), whenever
+        # the active renderer changes -- see that method's docstring for
+        # why a single GetVolume call doubles as the capability check.
+        self.volume_supported = False
+        self.volume = None
+
         # Library readiness -- all-or-nothing gate. Nothing that depends on
         # the media server (browsing, queueing) is usable until this is
         # True; see app.py's before_request gate.
@@ -130,8 +137,47 @@ class AppState:
             "host": self.renderer.host,
         })
         logger.info(f"Connected to renderer: {self.renderer.friendly_name} ({self.renderer.host})")
+        self._refresh_volume_capability()
         self._ensure_ticker()
         return True
+
+    def _refresh_volume_capability(self):
+        """Probes the just-selected renderer for volume support via a
+        single GetVolume call -- this doubles as both the capability
+        check and the slider's initial value, since UPnP has no separate
+        "do you support this" query. A None back just means this
+        renderer doesn't get a volume control (unreachable for it,
+        missing the service entirely, or -- as seen on one real device
+        during testing -- implementing RenderingControl but explicitly
+        refusing the action): reported, not treated as an error."""
+        vol = self.renderer.get_volume()
+        self.volume_supported = vol is not None
+        self.volume = vol
+        if self.volume_supported:
+            logger.info(f"Renderer '{self.renderer.friendly_name}' supports volume control (currently {vol}).")
+        else:
+            logger.info(f"Renderer '{self.renderer.friendly_name}' has no usable volume control.")
+        events.publish("renderer_volume", self.volume_status_payload())
+
+    def volume_status_payload(self):
+        """JSON-safe snapshot of volume state -- shared by /api/status and
+        the "renderer_volume" SSE event, same pattern as
+        library_status_payload()."""
+        return {"supported": self.volume_supported, "value": self.volume}
+
+    def set_volume(self, value):
+        """Sets volume on the active renderer. Returns True/False -- same
+        graceful-failure pattern as the transport controls (a rejected
+        or failed call, e.g. the renderer having just gone offline, is
+        expected here, not exceptional)."""
+        if not self.renderer or not self.volume_supported:
+            return False
+        value = max(0, min(100, int(value)))
+        ok = self.renderer.set_volume(value)
+        if ok:
+            self.volume = value
+            events.publish("renderer_volume", self.volume_status_payload())
+        return ok
 
     # ------------------------------------------------------------------
     # Media server -- fixed at deploy time via MEDIA_SERVER_DESC_URL, not

@@ -503,6 +503,51 @@ el("shuffle-btn").addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------
+// Volume -- disabled by default; enabled/seeded from /api/status on
+// load and from "renderer_volume" SSE events whenever the active
+// renderer changes (see applyVolume() below).
+// ---------------------------------------------------------------------
+function applyVolume(vol) {
+  const slider = el("volume-slider");
+  const display = el("volume-value");
+  if (!vol || !vol.supported) {
+    slider.disabled = true;
+    slider.value = 0;
+    display.textContent = "--";
+    return;
+  }
+  slider.disabled = false;
+  // Don't fight the user mid-drag if a server-pushed update lands while
+  // they're actively moving it (e.g. a change made from another tab).
+  if (document.activeElement !== slider) {
+    slider.value = vol.value;
+  }
+  display.textContent = String(vol.value);
+}
+
+function sendVolume(value) {
+  apiPost("/api/renderer/volume", { value: Number(value) }).catch((e) => {
+    toast(`Could not set volume: ${e.message}`, true);
+  });
+}
+
+// "input" only updates the live number readout as the thumb moves -- no
+// network call there. The actual SetVolume request fires once, on
+// "change" (mouse/touch release, or a committed keyboard step), rather
+// than repeatedly while dragging. The previous debounced-while-dragging
+// version could let an in-flight mid-drag request's SSE echo land
+// *after* the final released value, visibly snapping the slider back to
+// a stale position -- sending exactly once on release removes that
+// race rather than just narrowing its window.
+el("volume-slider").addEventListener("input", () => {
+  el("volume-value").textContent = el("volume-slider").value;
+});
+
+el("volume-slider").addEventListener("change", () => {
+  sendVolume(el("volume-slider").value);
+});
+
+// ---------------------------------------------------------------------
 // Playback tick (position, duration, LED bar, transport state)
 // ---------------------------------------------------------------------
 const LED_SEGMENTS = 40;
@@ -580,6 +625,7 @@ async function refreshStatus() {
     }
 
     renderQueue(data.queue);
+    applyVolume(data.volume);
   } catch (e) {
     console.error("status refresh failed", e);
   }
@@ -662,6 +708,9 @@ function connectStream() {
         if (!payload.data.ok) {
           toast(`Could not play "${payload.data.title}" -- renderer may be offline.`, true);
         }
+        break;
+      case "renderer_volume":
+        applyVolume(payload.data);
         break;
       case "renderer_status":
         el("renderer-value").dataset.name = payload.data.friendly_name || "Connected";

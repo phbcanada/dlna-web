@@ -140,6 +140,7 @@ def api_status():
         },
         "queue": q_snapshot,
         "position": position,
+        "volume": state.volume_status_payload(),
     })
 
 
@@ -173,6 +174,35 @@ def api_select_renderer():
         })
     except Exception as e:
         return jsonify({"connected": False, "error": f"Renderer not reachable: {e}"}), 502
+
+
+# ----------------------------------------------------------------------
+# Volume
+# ----------------------------------------------------------------------
+
+def _require_volume_support():
+    if not state.volume_supported:
+        return jsonify({"error": "This renderer doesn't support volume control."}), 409
+    return None
+
+
+@app.route("/api/renderer/volume", methods=["POST"])
+def api_set_volume():
+    err = _require_volume_support()
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    value = data.get("value")
+    if value is None:
+        return jsonify({"error": "value is required"}), 400
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return jsonify({"error": "value must be an integer"}), 400
+    ok = state.set_volume(value)
+    if not ok:
+        return jsonify({"error": "Renderer did not accept the volume change (it may be offline)."}), 502
+    return jsonify({"ok": True, "value": state.volume})
 
 
 # ----------------------------------------------------------------------

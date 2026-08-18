@@ -544,6 +544,67 @@ input {
   border-color: var(--led-green);
 }
 
+/* Volume slider -- sits beside the transport buttons. Left enabled but
+   at "--" / centered-at-0 when the active renderer doesn't support
+   RenderingControl (e.g. some smart TVs reject the action outright) or
+   when nothing is connected yet, rather than disappearing outright, so
+   the transport row doesn't visibly reflow switching renderers. */
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.volume-icon {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100px;
+  height: 11px;
+  border-radius: 5px;
+  background: var(--led-off);
+  outline: none;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--led-green);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.volume-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--led-green);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.volume-slider:disabled {
+  opacity: 0.4;
+}
+.volume-slider:disabled::-webkit-slider-thumb { background: var(--led-off); cursor: not-allowed; }
+.volume-slider:disabled::-moz-range-thumb { background: var(--led-off); cursor: not-allowed; }
+
+.volume-value {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  width: 24px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
 .transport-state {
   margin-left: auto;
   font-family: var(--font-mono);
