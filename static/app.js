@@ -75,6 +75,22 @@ function appendLogLine(entry) {
   body.scrollTop = body.scrollHeight;
 }
 
+// Rebuilds the console from the backend's ring buffer -- the same
+// "replace with current authoritative state" approach refreshStatus()
+// uses for the queue, just applied to log lines instead. Needed because
+// "log" SSE events published while this tab was backgrounded/suspended
+// are lost for good (no replay for a reconnecting client), so the
+// console otherwise goes silent after a while away, same root cause as
+// the earlier stale-queue bug.
+async function resyncLogs() {
+  try {
+    const logsData = await apiGet("/api/logs");
+    const body = el("console-body");
+    body.innerHTML = "";
+    (logsData.logs || []).forEach(appendLogLine);
+  } catch (e) { /* ignore -- next resync attempt will catch up */ }
+}
+
 el("console-toggle").addEventListener("click", () => {
   const consoleEl = el("console");
   const splitterEl = el("console-splitter");
@@ -745,15 +761,16 @@ function connectStream() {
     // reveal in the first place. checkLibraryStatus() is a harmless
     // no-op if nothing has actually changed.
     checkLibraryStatus();
-    // Also resync general app status (queue, renderer, position). If the
-    // connection was dropped for a while -- e.g. a mobile browser
-    // suspending a backgrounded tab -- any queue_status events published
-    // during that gap are gone for good; there's no replay for a
-    // reconnecting client. The "Now Playing" bar self-corrects on its own
-    // (it's polled every second regardless of what changed), but the
-    // queue panel only ever updates in response to a change event, so
-    // without this it can be left showing stale content indefinitely.
+    // Also resync general app status (queue, renderer, position) and the
+    // console log. If the connection was dropped for a while -- e.g. a
+    // mobile browser suspending a backgrounded tab -- any queue_status or
+    // log events published during that gap are gone for good; there's no
+    // replay for a reconnecting client. The "Now Playing" bar self-corrects
+    // on its own (it's polled every second regardless of what changed),
+    // but the queue panel and console only ever update in response to a
+    // change event, so without this they can be left stale indefinitely.
     refreshStatus();
+    resyncLogs();
   };
 }
 
@@ -767,6 +784,7 @@ function connectStream() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     refreshStatus();
+    resyncLogs();
   }
 });
 
@@ -872,10 +890,7 @@ function startLibraryStatusPolling() {
 // ---------------------------------------------------------------------
 (async function init() {
   buildLedBar();
-  try {
-    const logsData = await apiGet("/api/logs");
-    (logsData.logs || []).forEach(appendLogLine);
-  } catch (e) { /* ignore */ }
+  await resyncLogs();
 
   // Safe to open immediately: /api/stream is reachable even while the
   // library is still indexing, so the console shows live crawl progress
