@@ -738,6 +738,20 @@ function connectStream() {
           !payload.data.connected
         );
         break;
+      case "renderer_lost":
+        // The backend has given up on the selected renderer after a
+        // sustained stretch of unreachability (see state.py's
+        // RENDERER_LOST_TIMEOUT_SECONDS) -- distinct from a brief
+        // "renderer_status: offline" blip, which the app tolerates
+        // quietly. Just clear the chip back to an unselected state and
+        // leave it there; the browser may well be unattended when this
+        // fires, so we deliberately do NOT pop the picker open -- the
+        // person opens it themselves, from the chip, whenever they're
+        // back and ready to choose a renderer.
+        el("renderer-value").dataset.name = "";
+        setChip("renderer", false, "Not connected");
+        toast(`"${payload.data.friendly_name}" appears to be offline for good -- choose a renderer when ready.`, true);
+        break;
       case "library_status":
         applyLibraryStatus(payload.data);
         if (payload.data.ready) revealApp();

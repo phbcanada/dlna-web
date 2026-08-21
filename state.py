@@ -58,6 +58,18 @@ IDLE_POSITION = {"title": "None", "duration": "00:00:00", "position": "00:00:00"
 # unavailable renderer at startup.
 RETRY_INTERVAL_SECONDS = 10.0
 
+# How long the ticker tolerates a *selected* renderer being unreachable
+# before giving up on it entirely. Brief unreachability (a TV's network
+# stack napping for a few seconds, a momentary Wi-Fi hiccup) is normal and
+# should NOT force a reselect -- that's what the reachable/unreachable
+# toggle above this already handles gracefully. But a renderer that's been
+# unreachable this long is presumed gone (powered off, taken off the LAN,
+# etc.); at that point continuing to poll it every second forever is just
+# noise, and the person should pick a renderer from the SSDP list again
+# rather than have the app wait indefinitely for a device that may never
+# come back.
+RENDERER_LOST_TIMEOUT_SECONDS = 20.0
+
 # The media server is a fixed, deploy-time value now (not chosen at
 # runtime) -- set this once in the environment the service runs under.
 MEDIA_SERVER_ENV_VAR = "MEDIA_SERVER_DESC_URL"
@@ -99,6 +111,13 @@ class AppState:
         self._ticker_thread = None
         self._ticker_stop = threading.Event()
         self._state_lock = threading.Lock()
+
+        # Timestamp of when the currently-selected renderer first became
+        # unreachable, or None while it's reachable (or nothing's
+        # selected). Reset the moment it's reachable again -- only a
+        # *continuous* stretch of unreachability counts toward giving up
+        # on it; see RENDERER_LOST_TIMEOUT_SECONDS.
+        self._unreachable_since = None
 
     # ------------------------------------------------------------------
     # Renderer
@@ -374,6 +393,14 @@ class AppState:
 
                 if reachable:
                     self.renderer_last_seen = time.time()
+                    self._unreachable_since = None
+                else:
+                    now = time.time()
+                    if self._unreachable_since is None:
+                        self._unreachable_since = now
+                    elif now - self._unreachable_since >= RENDERER_LOST_TIMEOUT_SECONDS:
+                        self._declare_renderer_lost(renderer)
+                        continue  # self.renderer has changed; re-read next iteration
 
                 events.publish("playback_tick", {
                     "connected": reachable,
@@ -383,6 +410,36 @@ class AppState:
                     "title": display.get("title"),
                 })
             time.sleep(TICK_INTERVAL_SECONDS)
+
+    def _declare_renderer_lost(self, renderer):
+        """Called from the ticker once a selected renderer has been
+        continuously unreachable for RENDERER_LOST_TIMEOUT_SECONDS. Gives
+        up on it entirely rather than polling forever: tears down its
+        PlayQueue (which also stops that renderer's own GENA/polling
+        background threads -- see PlayQueue.shutdown()), clears it as the
+        active renderer so the ticker goes idle instead of continuing to
+        hammer a dead host, and tells the UI to send the person back to
+        the renderer picker. Deliberately does NOT touch the saved
+        config entry -- that's only rewritten on an explicit new
+        selection, so if this same renderer comes back later it's still
+        one click away in the picker rather than gone from history."""
+        logger.warning(
+            f"Renderer '{renderer.friendly_name}' has been unreachable for "
+            f"{RENDERER_LOST_TIMEOUT_SECONDS:.0f}s -- giving up on it. "
+            f"Select a renderer from the list to resume."
+        )
+        with self._state_lock:
+            if self.queue:
+                self.queue.shutdown()
+                self.queue = None
+            self.renderer = DLNARenderer()
+            self.renderer_connected = False
+            self._unreachable_since = None
+
+        events.publish("renderer_lost", {
+            "friendly_name": renderer.friendly_name,
+            "host": renderer.host,
+        })
 
 
 # Single process-wide instance, imported by app.py's routes.
