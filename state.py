@@ -199,6 +199,23 @@ class AppState:
         return ok
 
     # ------------------------------------------------------------------
+    # Active playlist -- which playlist file the queue rows' "+" button
+    # appends tracks to. Persisted so it survives a restart; distinct
+    # from the play queue itself and from save_playlist/load_playlist,
+    # which operate on the whole queue rather than one track at a time.
+    # ------------------------------------------------------------------
+
+    def set_active_playlist(self, name):
+        self.config["active_playlist"] = name
+        cfgmod.save_config(self.config)
+        logger.info(f"Active playlist set to '{name}'.")
+        events.publish("active_playlist", {"name": name})
+
+    @property
+    def active_playlist(self):
+        return self.config.get("active_playlist")
+
+    # ------------------------------------------------------------------
     # Media server -- fixed at deploy time via MEDIA_SERVER_DESC_URL, not
     # chosen at runtime. See _connect_configured_server() below.
     # ------------------------------------------------------------------

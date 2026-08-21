@@ -440,10 +440,15 @@ function renderQueue(snapshot) {
       `<span class="row-index"></span>` +
       `<span class="row-icon">${idx === snapshot.current_idx ? "\u25B6" : "\u{1F3B5}"}</span>` +
       `<span class="row-title"></span>` +
+      `<button class="row-add" title="Add to active playlist"${activePlaylistName ? "" : " disabled"}>\u2795</button>` +
       `<button class="row-remove" title="Remove from queue">\u{1F5D1}\uFE0F</button>`;
     row.querySelector(".row-index").textContent = idx + 1;
     row.querySelector(".row-title").textContent = track.title;
     row.querySelector(".row-title").addEventListener("click", () => playAt(idx));
+    row.querySelector(".row-add").addEventListener("click", (e) => {
+      e.stopPropagation();
+      addToActivePlaylist(idx);
+    });
     row.querySelector(".row-remove").addEventListener("click", (e) => {
       e.stopPropagation();
       removeFromQueue(idx);
@@ -640,6 +645,9 @@ async function refreshStatus() {
       setChip("renderer", false, "Not connected");
     }
 
+    activePlaylistName = data.active_playlist || null;
+    el("active-playlist-value").textContent = activePlaylistName || "Not set";
+
     renderQueue(data.queue);
     applyVolume(data.volume);
   } catch (e) {
@@ -648,19 +656,22 @@ async function refreshStatus() {
 }
 
 // ---------------------------------------------------------------------
-// Playlist save/load modal
+// Playlist save/load/active modal
 // ---------------------------------------------------------------------
-let modalMode = null; // "save" | "load"
+let modalMode = null; // "save" | "load" | "active"
 
 function openModal(mode) {
   modalMode = mode;
-  el("modal-title").textContent = mode === "save" ? "Save queue as playlist" : "Load playlist";
+  el("modal-title").textContent =
+    mode === "save" ? "Save queue as playlist" :
+    mode === "active" ? "Set active playlist" :
+    "Load playlist";
   el("modal-input").value = "";
   el("modal-list").innerHTML = "";
   el("modal-backdrop").classList.remove("hidden");
   el("modal-input").focus();
 
-  if (mode === "load") {
+  if (mode === "load" || mode === "active") {
     apiGet("/api/playlists").then((data) => {
       const listEl = el("modal-list");
       (data.playlists || []).forEach((name) => {
@@ -681,6 +692,7 @@ function closeModal() {
 
 el("playlist-save-btn").addEventListener("click", () => openModal("save"));
 el("playlist-load-btn").addEventListener("click", () => openModal("load"));
+el("active-playlist-chip").addEventListener("click", () => openModal("active"));
 el("modal-cancel").addEventListener("click", closeModal);
 
 el("modal-confirm").addEventListener("click", async () => {
@@ -690,6 +702,9 @@ el("modal-confirm").addEventListener("click", async () => {
     if (modalMode === "save") {
       await apiPost("/api/playlists/save", { name });
       toast(`Saved playlist "${name}".`);
+    } else if (modalMode === "active") {
+      await apiPost("/api/playlists/active", { name });
+      toast(`Active playlist set to "${name}".`);
     } else {
       await apiPost("/api/playlists/load", { name });
       toast(`Loaded playlist "${name}".`);
@@ -699,6 +714,34 @@ el("modal-confirm").addEventListener("click", async () => {
   }
   closeModal();
 });
+
+// ---------------------------------------------------------------------
+// Active playlist chip + queue rows' "+" button
+// ---------------------------------------------------------------------
+let activePlaylistName = null;
+
+function setActivePlaylist(name) {
+  activePlaylistName = name || null;
+  el("active-playlist-value").textContent = activePlaylistName || "Not set";
+  // Re-render so every row's "+" button picks up the new enabled state.
+  refreshQueue();
+}
+
+async function addToActivePlaylist(idx) {
+  if (!activePlaylistName) return;
+  try {
+    const data = await apiPost("/api/playlists/add_track", { index: idx });
+    if (data.added) {
+      toast(`Added "${data.title}" to "${data.playlist}".`);
+    } else {
+      toast(`"${data.title}" is already in "${data.playlist}".`);
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+
 
 // ---------------------------------------------------------------------
 // Live event stream
@@ -755,6 +798,12 @@ function connectStream() {
       case "library_status":
         applyLibraryStatus(payload.data);
         if (payload.data.ready) revealApp();
+        break;
+      case "active_playlist":
+        // Keeps every open tab's chip and "+" buttons in sync if the
+        // active playlist is changed from elsewhere (this app has no
+        // per-session state -- see state.py's module docstring).
+        setActivePlaylist(payload.data.name);
         break;
       default:
         break;

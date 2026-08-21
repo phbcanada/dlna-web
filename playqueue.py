@@ -450,6 +450,63 @@ class PlayQueue:
             logger.warning(f"Failed to load playlist '{playlist_name}': {e}")
             return False
 
+    def add_track_to_playlist(self, index, playlist_name):
+        """Appends the single track at queue position `index` to a
+        playlist file on disk -- unlike save_playlist/load_playlist,
+        which operate on the *entire* queue, this touches one track and
+        leaves the queue itself untouched. Backs the "+" button on each
+        queue row, for building up a playlist gradually while browsing
+        and queueing normally.
+
+        Skips (without treating it as an error) if a track with the same
+        URI is already in the playlist file -- clicking "+" again on a
+        track already added is far more likely an accidental repeat
+        click than a deliberate request for a duplicate entry.
+
+        Returns {"ok": bool, "added": bool, "title": str|None}."""
+        with self.lock:
+            if not (0 <= index < len(self.queue)):
+                return {"ok": False, "added": False, "title": None}
+            track = dict(self.queue[index])  # snapshot while holding the lock
+
+        title = track.get("title", "Unknown")
+        rel_path = track.get("relative_path")
+        uri = track.get("uri")
+        if not rel_path or not uri:
+            logger.warning(f"Cannot add '{title}' to playlist '{playlist_name}' -- missing library path.")
+            return {"ok": False, "added": False, "title": title}
+
+        save_dir = os.path.expanduser("~/.playlists")
+        os.makedirs(save_dir, exist_ok=True)
+        filepath = os.path.join(save_dir, f"{playlist_name}.m3u")
+
+        try:
+            existing_uris = set()
+            file_exists = os.path.exists(filepath)
+            if file_exists:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("#URI:"):
+                            existing_uris.add(line[5:].strip())
+
+            if uri in existing_uris:
+                logger.info(f"'{title}' is already in playlist '{playlist_name}' -- skipped duplicate.")
+                return {"ok": True, "added": False, "title": title}
+
+            with open(filepath, "a", encoding="utf-8") as f:
+                if not file_exists:
+                    f.write("#EXTM3U\n")
+                f.write(f"#EXTINF:-1,{title}\n")
+                f.write(f"#URI:{uri}\n")
+                f.write(f"{rel_path}\n")
+
+            logger.info(f"Added '{title}' to playlist '{playlist_name}'.")
+            return {"ok": True, "added": True, "title": title}
+        except Exception as e:
+            logger.warning(f"Failed to add '{title}' to playlist '{playlist_name}': {e}")
+            return {"ok": False, "added": False, "title": title}
+
     def add_to_queue(self, track_item):
         with self.lock:
             self.queue.append(track_item)

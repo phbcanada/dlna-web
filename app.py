@@ -141,6 +141,7 @@ def api_status():
         "queue": q_snapshot,
         "position": position,
         "volume": state.volume_status_payload(),
+        "active_playlist": state.active_playlist,
     })
 
 
@@ -521,6 +522,40 @@ def api_playlists_load():
         return jsonify({"error": "name is required"}), 400
     ok = state.queue.load_playlist(name)
     return jsonify({"ok": ok, **state.queue.snapshot()})
+
+
+@app.route("/api/playlists/active", methods=["POST"])
+def api_playlists_set_active():
+    """Sets which playlist the queue rows' "+" button appends to.
+    Deliberately doesn't require the playlist to already exist -- a
+    fresh name becomes "active" immediately, and the file itself is
+    only created the first time something's actually added to it."""
+    data = request.get_json(force=True, silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    state.set_active_playlist(name)
+    return jsonify({"ok": True, "active_playlist": name})
+
+
+@app.route("/api/playlists/add_track", methods=["POST"])
+def api_playlists_add_track():
+    """Appends a single queue track (by index) to the active playlist --
+    distinct from /api/playlists/save, which snapshots the whole queue.
+    Used by each queue row's "+" button."""
+    err = _require_queue()
+    if err:
+        return err
+    name = state.active_playlist
+    if not name:
+        return jsonify({"error": "No active playlist selected."}), 409
+    data = request.get_json(force=True, silent=True) or {}
+    index = data.get("index")
+    if index is None:
+        return jsonify({"error": "index is required"}), 400
+    result = state.queue.add_track_to_playlist(int(index), name)
+    result["playlist"] = name
+    return jsonify(result)
 
 
 # ----------------------------------------------------------------------

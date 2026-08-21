@@ -32,6 +32,10 @@ CONFIG_PATH = os.environ.get(
 
 DEFAULTS = {
     "renderer_desc_url": None,
+    # Name of the playlist that queue rows' "+" button appends tracks to.
+    # None means unset -- the UI disables those buttons until the person
+    # picks or creates one via the picker.
+    "active_playlist": None,
 }
 
 
