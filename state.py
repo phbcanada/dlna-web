@@ -52,7 +52,7 @@ TICK_INTERVAL_SECONDS = 1.0
 # we deliberately stop trusting that leftover data rather than display it.
 ACTIVE_TRANSPORT_STATES = {"PLAYING", "TRANSITIONING", "PAUSED_PLAYBACK"}
 
-IDLE_POSITION = {"title": "None", "duration": "00:00:00", "position": "00:00:00"}
+IDLE_POSITION = {"title": "None", "artist": None, "duration": "00:00:00", "position": "00:00:00"}
 
 # How long we wait between attempts to reconnect to a saved-but-currently-
 # unavailable renderer at startup.
@@ -368,7 +368,14 @@ class AppState:
         happened to report -- some renderers don't clear that data on
         Stop, which otherwise leaves the UI showing the previous track's
         title with a fully-filled progress bar even though nothing is
-        playing."""
+        playing.
+
+        Artist is the one field NOT trusted from the renderer -- not
+        every renderer echoes it back in TrackMetaData (gmediarender in
+        particular doesn't), so it's overlaid here from the play queue's
+        own browse-time library metadata for whatever track is current,
+        which is reliably populated since it comes straight from the
+        media server's DIDL-Lite listing."""
         renderer = self.renderer
         if not renderer or not renderer.control_url:
             return {"transport_state": "NO_MEDIA_PRESENT", **IDLE_POSITION}
@@ -376,6 +383,10 @@ class AppState:
         transport_state = renderer.get_transport_state()
         if transport_state in ACTIVE_TRANSPORT_STATES:
             pos = dict(renderer.get_position_info())
+            if self.queue:
+                current = self.queue.current_track()
+                if current and current.get("artist"):
+                    pos["artist"] = current["artist"]
         else:
             pos = dict(IDLE_POSITION)
         pos["transport_state"] = transport_state
@@ -425,6 +436,7 @@ class AppState:
                     "position": display.get("position"),
                     "duration": display.get("duration"),
                     "title": display.get("title"),
+                    "artist": display.get("artist"),
                 })
             time.sleep(TICK_INTERVAL_SECONDS)
 

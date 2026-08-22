@@ -217,6 +217,7 @@ def _browse_payload(items):
         entry = {"type": item_type, "id": data.get("id"), "title": data.get("title")}
         if item_type == "file":
             entry["uri"] = data.get("uri")
+            entry["artist"] = data.get("artist")
             entry["media_type"] = data.get("media_type", "other")
             file_count += 1
         elif item_type == "folder":
@@ -302,7 +303,7 @@ def api_queue_add():
     title, uri = data.get("title"), data.get("uri")
     if not title or not uri:
         return jsonify({"error": "title and uri are required"}), 400
-    item = {"id": data.get("id"), "title": title, "uri": uri}
+    item = {"id": data.get("id"), "title": title, "artist": data.get("artist"), "uri": uri}
     item["relative_path"] = state.browser._get_relative_path(title, uri)
     state.queue.add_to_queue(item)
     return jsonify(state.queue.snapshot())

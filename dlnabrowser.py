@@ -294,9 +294,18 @@ class DLNABrowser:
                         protocol_info = res_node.attrib.get('protocolInfo') if res_node is not None else None
                         class_node = el.find(f'{{{self.NS_DIDL_UPNP}}}class')
                         upnp_class = class_node.text if class_node is not None else None
+                        # upnp:artist is the standard performer tag; some
+                        # servers only populate dc:creator instead (which
+                        # is really "author", but commonly stands in for
+                        # artist on music items), so fall back to that.
+                        artist_node = el.find(f'{{{self.NS_DIDL_UPNP}}}artist')
+                        if artist_node is None:
+                            artist_node = el.find('{http://purl.org/dc/elements/1.1/}creator')
+                        artist = artist_node.text if artist_node is not None else None
                         items.append(('file', {
                             'id': el.attrib.get('id'),
                             'title': el.find('{http://purl.org/dc/elements/1.1/}title').text,
+                            'artist': artist,
                             'uri': uri,
                             'media_type': classify_media_type(upnp_class, protocol_info),
                         }))
@@ -307,15 +316,17 @@ class DLNABrowser:
 
                 files = re.findall(
                     r'<item\s+id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>'
+                    r'(?:.*?<upnp:artist[^>]*>([^<]*)</upnp:artist>)?'
+                    r'(?:.*?<dc:creator>([^<]*)</dc:creator>)?'
                     r'(?:.*?<upnp:class>([^<]*)</upnp:class>)?'
                     r'.*?<res([^>]*)>([^<]+)</res>',
                     result_xml, re.DOTALL
                 )
-                for fid, ftitle, uclass, res_attrs, furi in files:
+                for fid, ftitle, uartist, dcreator, uclass, res_attrs, furi in files:
                     pi_match = re.search(r'protocolInfo="([^"]*)"', res_attrs)
                     protocol_info = pi_match.group(1) if pi_match else None
                     items.append(('file', {
-                        'id': fid, 'title': ftitle, 'uri': furi,
+                        'id': fid, 'title': ftitle, 'artist': uartist or dcreator or None, 'uri': furi,
                         'media_type': classify_media_type(uclass or None, protocol_info),
                     }))
 

@@ -364,7 +364,7 @@ class DLNARenderer:
     def get_position_info(self):
         """Queries the renderer for current track duration, position, and metadata."""
         if not self.control_url:
-            return {"title": "None", "duration": "00:00:00", "position": "00:00:00"}
+            return {"title": "None", "artist": None, "duration": "00:00:00", "position": "00:00:00"}
 
         soap = f"""<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="{self.NS_SOAP}">
@@ -390,21 +390,35 @@ class DLNARenderer:
             position = root.find(".//RelTime").text or "00:00:00"
 
             title = "Unknown"
+            artist = None
             meta_xml = root.find(".//TrackMetaData").text
             if meta_xml and meta_xml != "NOT_IMPLEMENTED":
                 try:
                     meta_root = ET.fromstring(meta_xml)
-                    ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                    ns = {
+                        'dc': 'http://purl.org/dc/elements/1.1/',
+                        'upnp': 'urn:schemas-upnp-org:metadata-1-0/upnp/',
+                    }
                     title_node = meta_root.find(".//dc:title", ns)
                     if title_node is not None:
                         title = title_node.text
+                    # upnp:artist is the standard performer tag; some
+                    # servers/renderers only populate dc:creator instead
+                    # (which is really "author", but in practice gets
+                    # used as a stand-in for artist on music items), so
+                    # fall back to that when upnp:artist is absent.
+                    artist_node = meta_root.find(".//upnp:artist", ns)
+                    if artist_node is None:
+                        artist_node = meta_root.find(".//dc:creator", ns)
+                    if artist_node is not None and artist_node.text:
+                        artist = artist_node.text
                 except Exception:
                     pass
 
-            return {"title": title, "duration": duration, "position": position}
+            return {"title": title, "artist": artist, "duration": duration, "position": position}
         except Exception as e:
             logger.debug(f"get_position_info failed (renderer likely offline): {e}")
-            return {"title": "None", "duration": "00:00:00", "position": "00:00:00"}
+            return {"title": "None", "artist": None, "duration": "00:00:00", "position": "00:00:00"}
 
     # -- RenderingControl (volume) --------------------------------------
     #

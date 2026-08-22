@@ -179,6 +179,19 @@ class PlayQueue:
     def _publish_queue_status(self):
         events.publish("queue_status", self.snapshot())
 
+    def current_track(self):
+        """Returns a shallow copy of the track at current_idx, or None if
+        nothing's current. Used by state.py to overlay browse-time
+        library metadata (e.g. artist) that a renderer's own
+        GetPositionInfo/TrackMetaData echo doesn't reliably include --
+        gmediarender in particular doesn't populate it, so the renderer
+        isn't always the authoritative source for every display field
+        the way it is for title/duration/position."""
+        with self.lock:
+            if 0 <= self.current_idx < len(self.queue):
+                return dict(self.queue[self.current_idx])
+        return None
+
     def set_shuffle(self, enabled):
         """Turns shuffle on/off. Always starts a fresh shuffle_history --
         re-enabling shuffle later in the same session doesn't resume a

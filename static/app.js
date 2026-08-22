@@ -404,7 +404,7 @@ async function refreshBrowse() {
 
 async function addToQueue(item) {
   try {
-    await apiPost("/api/queue/add", { id: item.id, title: item.title, uri: item.uri });
+    await apiPost("/api/queue/add", { id: item.id, title: item.title, artist: item.artist, uri: item.uri });
   } catch (e) {
     toast(`Could not queue "${item.title}": ${e.message}`, true);
   }
@@ -592,11 +592,21 @@ function toSeconds(hms) {
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
 }
 
+function formatNowPlaying(title, artist) {
+  // No track loaded / stopped -- same "Nothing playing" placeholder as
+  // before artist support existed.
+  if (!title || title === "None") return "Nothing playing";
+  // Not every server/renderer populates artist metadata (upnp:artist /
+  // dc:creator) -- fall back to just the title when it's missing rather
+  // than showing a dangling "- Title".
+  return artist ? `${artist} - ${title}` : title;
+}
+
 function applyTick(tick) {
   if (!ledBarBuilt) buildLedBar();
 
   el("now-playing-title").textContent = tick.connected
-    ? (tick.title && tick.title !== "None" ? tick.title : "Nothing playing")
+    ? formatNowPlaying(tick.title, tick.artist)
     : "Renderer offline";
 
   el("position-code").textContent = tick.position || "00:00:00";
