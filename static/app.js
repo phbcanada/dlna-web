@@ -756,8 +756,11 @@ async function addToActivePlaylist(idx) {
 // ---------------------------------------------------------------------
 // Live event stream
 // ---------------------------------------------------------------------
+let activeEventSource = null;
+
 function connectStream() {
   const src = new EventSource("/api/stream");
+  activeEventSource = src;
 
   src.onmessage = (evt) => {
     let payload;
@@ -846,6 +849,26 @@ function connectStream() {
     resyncLogs();
   };
 }
+
+// Explicitly close the SSE connection before the page is navigated away
+// from -- otherwise it's left open indefinitely, since nothing else
+// ever closes it. This is just good hygiene (don't leave a stream
+// dangling once the page is gone) rather than a fix for anything
+// specific: a "stuck on Connecting to the media server..." issue after
+// Back-navigation was initially suspected to be caused by a lingering
+// connection like this one, but turned out to be Firefox's Local
+// Network Access feature misclassifying the page on session-history
+// restores and blocking its requests outright (worked around via
+// about:config's network.lna.skip-domains, not fixable from here).
+// pagehide (not unload) fires in both the "really leaving" and "being
+// frozen for bfcache" cases, and using it doesn't itself block bfcache
+// eligibility the way an unload handler would.
+window.addEventListener("pagehide", () => {
+  if (activeEventSource) {
+    activeEventSource.close();
+    activeEventSource = null;
+  }
+});
 
 // A tab returning to the foreground is the actual signal that matters
 // for the "left the queue stale after a while backgrounded" case (e.g.
