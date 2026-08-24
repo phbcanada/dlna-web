@@ -53,6 +53,7 @@ import argparse
 import json
 import logging
 import os
+import socket
 
 from flask import Flask, jsonify, request, Response, render_template
 
@@ -100,7 +101,7 @@ def _gate_until_library_ready():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", hostname=socket.gethostname())
 
 
 # ----------------------------------------------------------------------
