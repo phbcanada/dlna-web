@@ -570,6 +570,14 @@ document.addEventListener("keydown", (e) => {
     active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable
   );
 
+  if (e.key === "Escape") {
+    if (isBrowseSearch) {
+      clearBrowseSearch();
+      active.blur();
+    }
+    return;
+  }
+
   if (e.key === "/") {
     if (isTextInput) return; // let '/' type normally into whatever's already focused
     e.preventDefault();
@@ -608,6 +616,20 @@ document.addEventListener("keydown", (e) => {
     if (isTextInput && !isBrowseSearch) return;
     e.preventDefault();
     activateBrowseSelection();
+    return;
+  }
+
+  if (e.key === " ") {
+    // Unlike the other shortcuts, this one excludes the search field
+    // too -- typing a space while searching should type a space, not
+    // toggle playback. preventDefault() matters here regardless of
+    // what currently has focus: without it, Space's native behavior
+    // (page scroll on most elements, or a synthetic click if a
+    // <button> happens to be focused) would fire alongside our own
+    // toggle call.
+    if (isTextInput) return;
+    e.preventDefault();
+    apiPost("/api/queue/toggle").catch((err) => toast(err.message, true));
   }
 });
 
