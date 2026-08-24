@@ -281,11 +281,23 @@ function renderBreadcrumb(breadcrumb) {
 }
 
 async function navigateBackTo(steps) {
+  // Pop one entry per level being climbed -- the last one popped is the
+  // folder that was dove into *from* the destination we're landing on,
+  // so it's what selection should be restored to there. See
+  // browseEntryStack's comment for why this is id-based, and why a
+  // fully-drained stack (e.g. after a page reload) just means no
+  // restoration happens, rather than an error.
+  let restoreId = null;
+  for (let i = 0; i < steps; i++) {
+    const popped = browseEntryStack.pop();
+    restoreId = popped ? popped.id : null;
+  }
   try {
     for (let i = 0; i < steps; i++) {
       await apiPost("/api/browse/back");
     }
     await refreshBrowse();
+    if (restoreId !== null) restoreBrowseSelectionById(restoreId);
   } catch (e) {
     toast(`Navigation failed: ${e.message}`, true);
   }
@@ -330,6 +342,14 @@ function renderBrowseList(data) {
   const list = el("browse-list");
   list.innerHTML = "";
   setAddFolderButtonState(data.file_count, data.queue_track_limit);
+  // Tracks whether Left-arrow ("climb up the tree") has anywhere to go --
+  // mirrors the same can_go_back the breadcrumb's non-last crumbs use.
+  browseCanGoBack = !!data.can_go_back;
+  // Every call here means the browsed folder just changed (enter, back,
+  // or initial load) -- the previously typed search no longer applies
+  // to a list of different rows, so clear it here rather than at each
+  // call site individually.
+  clearBrowseSearch();
   if (!items || items.length === 0) {
     list.innerHTML = `<div class="list-empty">This folder is empty.</div>`;
     return;
@@ -337,6 +357,7 @@ function renderBrowseList(data) {
   items.forEach((item) => {
     const row = document.createElement("div");
     row.className = `row ${item.type}`;
+    row.dataset.itemId = item.id; // used to relocate this row when Left-arrow restores selection after climbing back up
     if (item.type === "folder") {
       row.innerHTML =
         `<span class="row-icon">\u{1F4C1}</span>` +
@@ -369,6 +390,18 @@ function renderBrowseList(data) {
     }
     list.appendChild(row);
   });
+
+  // Auto-select the first row so the list always has a keyboard cursor
+  // to act on -- the only case where nothing's selected is now an
+  // empty folder (handled by the early return above). This also
+  // resolves the Up-arrow-wraps-to-the-end oddity that used to show up
+  // right after entering a folder: that came from moveBrowseSelection()
+  // treating "nothing selected yet" as a reason to wrap to the last
+  // row, which can no longer occur here since something's always
+  // selected already. navigateBackTo() still overrides this with the
+  // remembered row when climbing back up -- it calls
+  // restoreBrowseSelectionById() right after this function returns.
+  selectBrowseRow(0);
 }
 
 async function queueFolder(item) {
@@ -380,9 +413,208 @@ async function queueFolder(item) {
   }
 }
 
+// ---------------------------------------------------------------------
+// Browse selection + search + keyboard shortcuts
+//
+// A single "selected row" cursor (browseSelectedIndex, into the
+// currently-rendered list of .row elements in document order) backs
+// three things:
+//   - Search: typing selects+scrolls to the first row whose title
+//     starts with the typed text (case-insensitive). Does NOT filter
+//     the list -- full folder contents stay visible, this just moves
+//     the cursor to a match.
+//   - Up/Down arrows: move the same cursor by one row, regardless of
+//     whether it lands on a search match -- plain list navigation.
+//   - Enter: activates whatever's currently selected (folder -> enter
+//     it, track -> queue it) by re-using each row's own click handler,
+//     so this never duplicates enterFolder()/addToQueue()'s logic.
+// Selection is cleared automatically on every folder change -- see
+// renderBrowseList(), the one function every navigation path goes
+// through (enter, back, initial load).
+// ---------------------------------------------------------------------
+let browseSelectedIndex = -1;
+
+// Whether Left-arrow has anywhere to go -- kept in sync with
+// data.can_go_back on every renderBrowseList() call (same value the
+// breadcrumb's non-last crumbs are already clickable based on).
+let browseCanGoBack = false;
+
+// One entry per successful dive into a folder (via click, Enter, or
+// Right-arrow -- all three funnel through enterFolder()), holding the
+// id of the folder row that was dove into. Climbing back up (Left-
+// arrow, or a breadcrumb click) pops the matching number of entries and
+// restores selection to that id in the newly-rendered parent list --
+// as if the dive had never happened. Deliberately keyed by item id
+// rather than row index/scroll position: an id lookup still finds the
+// right row if the folder's contents changed while you were down in a
+// subfolder (something added/removed), where a remembered index could
+// silently land on the wrong row. Lives only in this tab's memory --
+// a page reload loses it, so climbing up right after a reload just
+// won't restore a selection (there's nothing to restore it to).
+let browseEntryStack = [];
+
+function browseRows() {
+  return Array.from(el("browse-list").querySelectorAll(".row"));
+}
+
+function clearBrowseSelection() {
+  browseRows().forEach((r) => r.classList.remove("row-selected"));
+  browseSelectedIndex = -1;
+}
+
+function selectBrowseRow(index) {
+  const rows = browseRows();
+  if (rows.length === 0) {
+    browseSelectedIndex = -1;
+    return;
+  }
+  index = Math.max(0, Math.min(index, rows.length - 1));
+  rows.forEach((r) => r.classList.remove("row-selected"));
+  browseSelectedIndex = index;
+  const row = rows[index];
+  row.classList.add("row-selected");
+  row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function restoreBrowseSelectionById(id) {
+  const rows = browseRows();
+  const index = rows.findIndex((row) => row.dataset.itemId === String(id));
+  if (index !== -1) selectBrowseRow(index);
+}
+
+function moveBrowseSelection(delta) {
+  const rows = browseRows();
+  if (rows.length === 0) return;
+  const next = browseSelectedIndex === -1
+    ? (delta > 0 ? 0 : rows.length - 1)
+    : browseSelectedIndex + delta;
+  selectBrowseRow(next);
+}
+
+function activateBrowseSelection() {
+  const rows = browseRows();
+  if (browseSelectedIndex < 0 || browseSelectedIndex >= rows.length) return;
+  const title = rows[browseSelectedIndex].querySelector(".row-title");
+  if (title) title.click(); // folder rows -> enterFolder(), file rows -> addToQueue()
+}
+
+function diveIntoBrowseSelection() {
+  // Right-arrow: same as Enter for a folder row, but deliberately does
+  // NOT queue a track row -- a no-op there rather than a "queue this"
+  // shortcut, since Right is about descending the tree, not queueing.
+  const rows = browseRows();
+  if (browseSelectedIndex < 0 || browseSelectedIndex >= rows.length) return;
+  const row = rows[browseSelectedIndex];
+  if (!row.classList.contains("folder")) return;
+  const title = row.querySelector(".row-title");
+  if (title) title.click();
+}
+
+function clearBrowseSearch() {
+  const input = el("browse-search");
+  if (input) input.value = "";
+  clearBrowseSelection();
+}
+
+function runBrowseSearch(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) {
+    clearBrowseSelection();
+    return;
+  }
+  const rows = browseRows();
+  const matchIndex = rows.findIndex((row) => {
+    const title = row.querySelector(".row-title");
+    return title && title.textContent.toLowerCase().startsWith(q);
+  });
+  if (matchIndex === -1) {
+    clearBrowseSelection();
+    return;
+  }
+  selectBrowseRow(matchIndex);
+}
+
+el("browse-search").addEventListener("input", (e) => {
+  runBrowseSearch(e.target.value);
+});
+
+// ---------------------------------------------------------------------
+// Mouse-hover vs. keyboard-selection: CSS :hover tracks literal mouse
+// position regardless of whether the mouse is what's actually driving
+// interaction right now, which caused two visible problems: hovering
+// one row while keyboard-arrowing to another shows two competing
+// highlights, and several browsers hide the cursor while typing --
+// leaving it invisibly parked over whatever row it last sat on, so that
+// row lights up with no visible cause. Same fix browsers use for
+// :focus-visible: track which input mode is currently "live" via a body
+// class, and let CSS suppress :hover while keyboard mode is active (see
+// style.css). Any real key press engages it; any real mouse move
+// releases it back to normal hover behavior.
+// ---------------------------------------------------------------------
+function setKeyboardNavMode(active) {
+  document.body.classList.toggle("kbd-nav", active);
+}
+
+document.addEventListener("mousemove", () => setKeyboardNavMode(false));
+
+// Global keyboard shortcuts -- ignored while focus is in a text field
+// other than the search box itself (volume slider, playlist-name modal,
+// manual renderer URL field), so they don't hijack normal typing/input
+// there.
+document.addEventListener("keydown", (e) => {
+  setKeyboardNavMode(true);
+
+  const active = document.activeElement;
+  const isBrowseSearch = active && active.id === "browse-search";
+  const isTextInput = active && (
+    active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable
+  );
+
+  if (e.key === "/") {
+    if (isTextInput) return; // let '/' type normally into whatever's already focused
+    e.preventDefault();
+    el("browse-search").focus();
+    return;
+  }
+
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (isTextInput && !isBrowseSearch) return;
+    e.preventDefault();
+    moveBrowseSelection(e.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+
+  if (e.key === "ArrowLeft") {
+    if (isTextInput && !isBrowseSearch) return;
+    // A single-line text field's own cursor movement takes priority
+    // over "climb the tree" while the search box has text in it and
+    // isn't empty/at position 0 -- otherwise editing what you typed
+    // would be impossible.
+    if (isBrowseSearch && active.selectionStart !== 0) return;
+    e.preventDefault();
+    if (browseCanGoBack) navigateBackTo(1);
+    return;
+  }
+
+  if (e.key === "ArrowRight") {
+    if (isTextInput && !isBrowseSearch) return;
+    if (isBrowseSearch && active.selectionStart !== active.value.length) return;
+    e.preventDefault();
+    diveIntoBrowseSelection();
+    return;
+  }
+
+  if (e.key === "Enter") {
+    if (isTextInput && !isBrowseSearch) return;
+    e.preventDefault();
+    activateBrowseSelection();
+  }
+});
+
 async function enterFolder(item) {
   try {
     const data = await apiPost("/api/browse/enter", { id: item.id, title: item.title });
+    browseEntryStack.push({ id: item.id });
     renderBreadcrumb(data.breadcrumb);
     renderBrowseList(data);
   } catch (e) {
@@ -399,6 +631,7 @@ async function refreshBrowse() {
     el("browse-list").innerHTML = `<div class="list-empty">Connect a media server to browse your music.</div>`;
     el("breadcrumb").innerHTML = "";
     setAddFolderButtonState(null, null);
+    browseCanGoBack = false;
   }
 }
 

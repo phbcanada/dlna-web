@@ -89,7 +89,10 @@
     <section class="panel" id="browse-panel">
       <div class="panel-header">
         <h2>Browse</h2>
-        <button class="btn-sm" id="add-folder-btn" disabled>Queue All</button>
+        <div class="panel-header-actions">
+          <input type="text" id="browse-search" class="browse-search" placeholder="Search…" autocomplete="off">
+          <button class="btn-sm" id="add-folder-btn" disabled>Queue All</button>
+        </div>
       </div>
       <div class="breadcrumb" id="breadcrumb"></div>
       <div class="list" id="browse-list">
