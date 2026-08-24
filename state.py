@@ -151,6 +151,22 @@ class AppState:
         new_renderer = DLNARenderer()
         new_renderer.resolve_control_url(desc_url)  # raises if unreachable
 
+        # Force a known-stopped starting point before wiring up GENA/
+        # monitoring. This matters most right after a server restart --
+        # the renderer itself has no idea our process just restarted,
+        # so if it was mid-track when we went down, it's still happily
+        # playing that same track when we reconnect, with no
+        # relationship to the fresh (reset-to-the-start) queue below.
+        # Rather than trying to detect and reconcile that mismatch,
+        # just stop it outright: the queue's reset_position() below
+        # already establishes "nothing is presumed playing" as the
+        # starting state, so the renderer should actually be in that
+        # state too, not just presumed to be. Unconditional (not
+        # gated on checking transport state first) since stop() is
+        # already safe/idempotent if nothing's playing -- no reason to
+        # add a check-then-act race of its own.
+        new_renderer.stop()
+
         with self._state_lock:
             if self.session:
                 self.session.shutdown()
