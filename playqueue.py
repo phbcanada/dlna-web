@@ -26,6 +26,31 @@
 #     this module now surfaces failures as warnings + events instead of
 #     silently trusting they worked, since the renderer being off is an
 #     expected state, not a bug.
+#
+# Architecture refactor (queue/session split):
+#   Historically this module had a single PlayQueue class that conflated
+#   two different lifetimes: the track list + position (which has no
+#   reason to depend on a renderer being attached) and the renderer
+#   session (GENA/polling, transport commands -- which by definition
+#   needs a live renderer). That coupling meant the queue was destroyed
+#   and recreated every time a renderer was selected or lost, even though
+#   nothing about "what tracks are queued" actually changed.
+#
+#   This is now two classes:
+#     - Queue: pure data. Track list, current_idx, shuffle bookkeeping,
+#       playlist save/load. Never touches a renderer. Long-lived --
+#       created once and survives renderer selection/loss.
+#     - PlaybackSession: renderer-bound. Owns the GENA listener/polling
+#       thread and every call that actually pushes a URI to a renderer.
+#       Takes a Queue reference and asks it "what's the next/prev/current
+#       track" via advance()/retreat()/jump_to()/prepare_for_play(),
+#       which return data (or None) without side effects on the
+#       renderer -- only PlaybackSession decides whether to act on what
+#       comes back.
+#
+#   PlayQueue below is now a thin backward-compatible facade over both,
+#   kept so the original CLI (controller.py/main.py/dlnabrowser.py)
+#   doesn't need to change at all.
 # --------------------------------------------------------------------------
 import threading
 import time
@@ -88,23 +113,26 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
                     for state_node in inner_root.iter():
                         if 'TransportState' in state_node.tag:
                             state = state_node.attrib.get('val', '')
-                            play_queue = self.server.play_queue
+                            # NOTE: attribute name kept as "play_queue" for
+                            # minimal diff, but this is now a PlaybackSession
+                            # instance (see _start_gena_listener below).
+                            session = self.server.play_queue
 
-                            with play_queue.state_lock:
-                                current_was_playing = play_queue.was_playing
+                            with session.state_lock:
+                                current_was_playing = session.was_playing
 
                                 gena_logger.debug(
                                     f"Device broadcast: {state} (was_playing={current_was_playing})"
                                 )
 
                                 if state in ("PLAYING", "TRANSITIONING"):
-                                    play_queue.was_playing = True
+                                    session.was_playing = True
 
                                 elif state in ("STOPPED", "NO_MEDIA_PRESENT", "PAUSED_PLAYBACK"):
                                     if current_was_playing and state != "PAUSED_PLAYBACK":
-                                        play_queue.was_playing = False
+                                        session.was_playing = False
                                         gena_logger.info("Track ended -- advancing queue.")
-                                        play_queue.next()
+                                        session.next()
 
         except Exception as e:
             gena_logger.warning(f"GENA event parsing error: {e}")
@@ -115,48 +143,44 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
         pass
 
 
-class PlayQueue:
-    def __init__(self, renderer, *args, **kwargs):
-        self.renderer = renderer
+class Queue:
+    """Renderer-independent play queue: track list, position, shuffle
+    bookkeeping, and playlist file I/O. Nothing in this class calls a
+    renderer or assumes one exists -- it's safe to build up, browse, and
+    reorder a queue with no renderer selected at all.
+
+    Mutation methods that affect *what track is current* (advance,
+    retreat, jump_to, prepare_for_play) return the resulting track dict
+    (or None) rather than playing it -- it's up to the caller (normally
+    a PlaybackSession) to decide whether/how to push that to a renderer.
+    This keeps "what's next" (a queue question) separate from "tell the
+    device to play it" (a session question).
+    """
+
+    def __init__(self):
         self.queue = []            # List of dicts: [{'title': x, 'uri': y, 'mime': z}]
         self.current_idx = -1
 
-        # RLock, not Lock: several methods (clear(), next() at end-of-queue)
-        # call self.stop() while already holding self.lock, and stop() in
-        # turn publishes a snapshot that also needs self.lock. A plain Lock
-        # would deadlock on that re-entry from the same thread.
+        # RLock, not Lock: clear() calls stop-adjacent bookkeeping while
+        # already holding the lock in some call paths below.
         self.lock = threading.RLock()
-        self.running = True
-        self.state_lock = threading.Lock()
-        self.was_playing = False
-
-        # =====================================================================
-        # EXPERIMENTAL TOGGLE: Set to True to override monitor loop with GENA
-        # =====================================================================
-        self.use_gena = True
-
-        # Reference to the running GENA HTTPServer, if any, so shutdown()
-        # can actually stop it and release its port -- without this, the
-        # listener from a previous renderer selection stays bound forever,
-        # and every renderer switch after the first one silently loses
-        # GENA (falls back to polling) because the port is still taken.
-        self.gena_server = None
 
         # Shuffle: deliberately does NOT reorder self.queue itself -- the
         # displayed queue, playlist saves, and remove_at()'s index
         # bookkeeping all assume a stable list. Instead it only changes
-        # what next()/prev() pick: shuffle_history tracks which indices
-        # have already been "current" this shuffle session (in the order
-        # they were played), and next() randomly picks from whatever's
-        # left. No auto-loop -- once everything's been played, next()
-        # stops, same as linear playback reaching the end of the queue.
+        # what advance()/retreat() pick: shuffle_history tracks which
+        # indices have already been "current" this shuffle session (in
+        # the order they were played), and advance() randomly picks from
+        # whatever's left. No auto-loop -- once everything's been
+        # played, advance() reports "stop", same as linear playback
+        # reaching the end of the queue.
         self.shuffle_enabled = False
         self.shuffle_history = []
         # True right after a full shuffle pass finishes (all tracks
         # played, history cleared) until the next navigation action.
-        # play() consults this to start a genuinely fresh shuffle pass
-        # (a new random pick) instead of just replaying whatever track
-        # happened to be current when the pass ended.
+        # prepare_for_play() consults this to start a genuinely fresh
+        # shuffle pass (a new random pick) instead of just replaying
+        # whatever track happened to be current when the pass ended.
         self.shuffle_exhausted = False
 
     # ------------------------------------------------------------------
@@ -192,6 +216,14 @@ class PlayQueue:
                 return dict(self.queue[self.current_idx])
         return None
 
+    def get_current_track(self):
+        """CLI-facing equivalent of current_track() (kept as a separate
+        name for backward compatibility with controller.py)."""
+        with self.lock:
+            if 0 <= self.current_idx < len(self.queue):
+                return self.queue[self.current_idx]
+            return None
+
     def set_shuffle(self, enabled):
         """Turns shuffle on/off. Always starts a fresh shuffle_history --
         re-enabling shuffle later in the same session doesn't resume a
@@ -207,9 +239,9 @@ class PlayQueue:
     def _mark_played_for_shuffle(self, idx):
         """Caller must hold self.lock. Records idx as "already played"
         this shuffle session -- called whenever current_idx is about to
-        move away from it, whether via next(), a manual play_at(), or
+        move away from it, whether via advance(), a manual jump_to(), or
         the natural end-of-track auto-advance (which also just calls
-        next()). Only meaningful while shuffle is on."""
+        advance()). Only meaningful while shuffle is on."""
         if self.shuffle_enabled and 0 <= idx < len(self.queue):
             self.shuffle_history.append(idx)
 
@@ -226,160 +258,244 @@ class PlayQueue:
             if h != removed_index
         ]
 
-    def play_at(self, index):
-        """Jumps directly to a specific queue position and plays it --
-        used when the user clicks a track in the queue panel."""
-        ok = False
+    def reset_position(self):
+        """Resets playback position to the start of the queue without
+        touching queue contents -- called by AppState whenever the
+        renderer session is torn down (lost, or a different renderer
+        selected). Deliberately mirrors "reached the end of the queue":
+        nothing is playing, current_idx points at track 0 (or -1 if the
+        queue is empty) ready for a future Play, and no attempt is made
+        to reconcile this against whatever the newly-attached renderer
+        might separately be reporting as playing. A future Play on a new
+        session starts fresh from here rather than resuming whatever was
+        "current" under the old renderer."""
+        with self.lock:
+            self.current_idx = 0 if self.queue else -1
+            self.shuffle_history = []
+            self.shuffle_exhausted = False
+        self._publish_queue_status()
+
+    def jump_to(self, index):
+        """Moves current_idx directly to `index` -- used both by play_at
+        (clicking a track in the queue panel) and internally. Does not
+        play anything; returns the track at that position so the caller
+        can decide whether to push it to a renderer.
+        Returns {"ok": bool, "track": dict|None}."""
         with self.lock:
             self.shuffle_exhausted = False
-            if 0 <= index < len(self.queue):
-                if index != self.current_idx:
-                    self._mark_played_for_shuffle(self.current_idx)
-                self.current_idx = index
-                self._play_current()
-                ok = True
+            if not (0 <= index < len(self.queue)):
+                return {"ok": False, "track": None}
+            if index != self.current_idx:
+                self._mark_played_for_shuffle(self.current_idx)
+            self.current_idx = index
+            track = dict(self.queue[self.current_idx])
         self._publish_queue_status()
-        return ok
+        return {"ok": True, "track": track}
+
+    def prepare_for_play(self):
+        """Called when Play is pressed. Picks the track that should
+        start playing: a fresh shuffle pick if the previous pass just
+        finished, current_idx if one's already set, or track 0 if
+        nothing's current yet. Returns the track dict, or None if the
+        queue is empty."""
+        with self.lock:
+            if not self.queue:
+                return None
+            if self.shuffle_enabled and self.shuffle_exhausted:
+                # A full shuffle pass just finished (see advance()).
+                # Start a genuinely fresh pass -- a new random pick --
+                # rather than just replaying whatever track happened to
+                # be current when the pass ended.
+                self.shuffle_exhausted = False
+                self.current_idx = random.choice(range(len(self.queue)))
+                logger.info("Shuffle: starting a fresh pass.")
+            elif self.current_idx == -1:
+                self.current_idx = 0
+            track = dict(self.queue[self.current_idx])
+        self._publish_queue_status()
+        return track
+
+    def advance(self):
+        """Moves to the next track (linear or shuffle). Does not play
+        anything -- returns a dict describing what happened:
+          {"track": dict, "stop": False}       -- move to this track
+          {"track": None, "stop": True}        -- end of queue, stop
+          {"track": None, "stop": False, "no_op": True}
+                                                 -- shuffle pass already
+                                                    finished; caller
+                                                    should do nothing
+                                                    (only Play starts a
+                                                    fresh pass)
+        """
+        with self.lock:
+            if self.shuffle_enabled:
+                if self.shuffle_exhausted:
+                    # This pass already finished. Deliberately a no-op
+                    # here -- only an explicit Play starts a fresh pass
+                    # (see prepare_for_play()). If advance() also
+                    # silently restarted it, repeatedly pressing Next
+                    # would function as an implicit auto-loop, which is
+                    # specifically not wanted.
+                    logger.info("Shuffle: this pass is finished -- press Play to start a fresh one.")
+                    self._publish_queue_status()
+                    return {"track": None, "stop": False, "no_op": True}
+                result = self._shuffle_advance()
+            elif self.current_idx + 1 < len(self.queue):
+                self.current_idx += 1
+                result = {"track": dict(self.queue[self.current_idx]), "stop": False}
+            else:
+                logger.info("End of play queue reached.")
+                result = {"track": None, "stop": True}
+        self._publish_queue_status()
+        return result
+
+    def _shuffle_advance(self):
+        """Caller must hold self.lock. Marks the current track as played,
+        then randomly picks one of whatever's left. Once everything has
+        been played, reports stop (no auto-loop, matching linear
+        advance()'s end-of-queue behavior), clears shuffle_history, and
+        sets shuffle_exhausted -- see prepare_for_play(), the only thing
+        that clears that flag and starts a fresh pass."""
+        self._mark_played_for_shuffle(self.current_idx)
+        remaining = [i for i in range(len(self.queue)) if i not in self.shuffle_history]
+        if not remaining:
+            logger.info("Shuffle: all tracks in the queue have been played.")
+            self.shuffle_history = []
+            self.shuffle_exhausted = True
+            return {"track": None, "stop": True}
+        self.current_idx = random.choice(remaining)
+        return {"track": dict(self.queue[self.current_idx]), "stop": False}
+
+    def retreat(self):
+        """Moves to the previous track (linear or shuffle). Does not play
+        anything -- returns {"track": dict, "stop": False} or
+        {"track": None, "stop": False, "no_op": True} when already at
+        the first track / no shuffle history to go back to (deliberately
+        never "stop"s -- there's nothing to stop, playback just doesn't
+        move)."""
+        with self.lock:
+            if self.shuffle_enabled:
+                if self.shuffle_history:
+                    self.current_idx = self.shuffle_history.pop()
+                    result = {"track": dict(self.queue[self.current_idx]), "stop": False}
+                else:
+                    # Empty history covers both "nothing played yet" and
+                    # "a pass just finished" (shuffle_history is cleared
+                    # on exhaustion) -- correctly a no-op either way, and
+                    # deliberately doesn't touch shuffle_exhausted so a
+                    # follow-up Play still starts a fresh pass correctly.
+                    logger.info("No earlier shuffle history to go back to.")
+                    result = {"track": None, "stop": False, "no_op": True}
+            elif self.current_idx > 0:
+                self.current_idx -= 1
+                result = {"track": dict(self.queue[self.current_idx]), "stop": False}
+            else:
+                logger.info("Already at the first track.")
+                result = {"track": None, "stop": False, "no_op": True}
+        self._publish_queue_status()
+        return result
+
+    def clear(self):
+        """Clears queue contents and resets position. Does NOT touch a
+        renderer -- if a session is attached, the caller (PlaybackSession
+        / the route) is responsible for stopping it first."""
+        with self.lock:
+            self.queue.clear()
+            self.current_idx = -1
+            self.shuffle_history = []
+            self.shuffle_exhausted = False
+            logger.info("Queue cleared.")
+        self._publish_queue_status()
+
+    def display_queue(self):
+        """CLI-only pretty-printer."""
+        with self.lock:
+            print("\n" + "=" * 50)
+            print(" 🎶 CURRENT PLAY QUEUE:")
+            print("=" * 50)
+            if not self.queue:
+                print("   (Queue is empty)")
+            else:
+                for idx, track in enumerate(self.queue):
+                    prefix = "➔ ▶ " if idx == self.current_idx else "    "
+                    print(f"{prefix}{idx + 1}. {track['title']}")
+            print("=" * 50)
+
+    def add_to_queue(self, track_item):
+        with self.lock:
+            self.queue.append(track_item)
+            logger.info(f"Queued: {track_item['title']}")
+            if self.current_idx == -1:
+                self.current_idx = 0
+        self._publish_queue_status()
+
+    def insert_and_select(self, track_item):
+        """Inserts track_item immediately after the current track (or at
+        the front if nothing's current) and makes it current. Used for
+        "play this now" -- returns the track so the caller can decide
+        whether to push it to a renderer immediately."""
+        with self.lock:
+            insert_pos = self.current_idx + 1 if self.current_idx != -1 else 0
+            self.queue.insert(insert_pos, track_item)
+            self.current_idx = insert_pos
+            track = dict(self.queue[self.current_idx])
+        self._publish_queue_status()
+        return track
 
     def remove_at(self, index):
         """Removes the track at `index` from the queue -- used by the "X"
-        button on each queue row. If that track is the currently-selected
-        one, playback moves on to whatever now sits in its place (the
-        track that followed it), the same as the Next transport control;
-        if there's nothing after it, playback stops instead, mirroring
-        end-of-queue. Removing a track before the current one just shifts
-        current_idx down to keep pointing at the same logical track, with
-        no effect on playback. Removing one after it has no effect at all."""
+        button on each queue row. Does not itself talk to a renderer;
+        returns enough information for a PlaybackSession (if attached)
+        to decide what to do about playback:
+          {"ok": True, "removed": dict, "advance_track": dict|None,
+           "should_stop": bool}
+        advance_track is set when the removed track was the currently-
+        playing one and there's a track now in its place (the caller
+        should push that to the renderer, same as Next); should_stop is
+        set when the queue is now empty, or the removed track was the
+        last (and current) one with nothing to advance to."""
         with self.lock:
             if not (0 <= index < len(self.queue)):
-                return False
+                return {"ok": False}
 
             removing_current = (index == self.current_idx)
             removed = self.queue.pop(index)
             logger.info(f"Removed from queue: {removed.get('title', 'Unknown')}")
             self._reindex_shuffle_history_after_removal(index)
 
+            advance_track = None
+            should_stop = False
+
             if not self.queue:
                 self.current_idx = -1
-                self.stop()
+                should_stop = True
             elif removing_current:
                 if index < len(self.queue):
                     # The track that followed it has slid into this same
-                    # position -- play it, same as the Next button would.
+                    # position -- caller should play it, same as Next.
                     self.current_idx = index
-                    self._play_current()
+                    advance_track = dict(self.queue[self.current_idx])
                 else:
                     # Removed the last (and current) track -- nothing to
-                    # advance to, so just stop, same as end-of-queue.
+                    # advance to, so caller should stop, same as
+                    # end-of-queue.
                     self.current_idx = len(self.queue) - 1
                     logger.info("Removed the last (and currently playing) track -- nothing left to advance to.")
-                    self.stop()
+                    should_stop = True
             elif index < self.current_idx:
                 self.current_idx -= 1
+
         self._publish_queue_status()
-        return True
+        return {
+            "ok": True,
+            "removed": removed,
+            "advance_track": advance_track,
+            "should_stop": should_stop,
+        }
 
     # ------------------------------------------------------------------
-    # GENA subscription plumbing
+    # Playlist file I/O -- operates on disk + queue data only, no renderer
     # ------------------------------------------------------------------
-
-    def _get_local_ip(self):
-        """Forces finding the real local IP interface facing the renderer."""
-        try:
-            from urllib.parse import urlparse
-
-            event_url = getattr(self.renderer, 'avtransport_event_url', "")
-            if event_url:
-                target_host = urlparse(event_url).hostname
-            else:
-                target_host = self.renderer.host
-
-            if not target_host or target_host.lower() == "unknown":
-                return "0.0.0.0"
-
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect((target_host, 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-            return local_ip
-        except Exception as e:
-            logger.debug(f"Auto-IP detection failed: {e}")
-            return "0.0.0.0"
-
-    def _start_gena_listener(self):
-        """Spins up the HTTP backend and sends the SUBSCRIBE packet safely."""
-        local_ip = self._get_local_ip()
-        local_port = 8089  # Choose any open port on your system
-
-        logger.info(f"Local GENA listener binding to: http://{local_ip}:{local_port}")
-        if local_ip in ["0.0.0.0", "127.0.0.1"]:
-            logger.warning("Local IP resolved to loopback -- renderer won't be able to route events back here.")
-
-        def run_server():
-            try:
-                server = HTTPServer((local_ip, local_port), GENAEventHTTPHandler)
-                server.play_queue = self
-                self.gena_server = server
-                server.serve_forever()
-            except Exception as e:
-                logger.warning(f"GENA background server failed to start: {e}. Falling back to polling.")
-                self._start_local_monitor_thread()
-
-        threading.Thread(target=run_server, daemon=True).start()
-
-        def send_subscribe():
-            event_url = getattr(self.renderer, 'avtransport_event_url', None)
-            if not event_url:
-                self._start_local_monitor_thread()
-                return
-
-            headers = {
-                "HOST": event_url.split("://")[1].split("/")[0],
-                "TIMEOUT": "Second-300"
-            }
-
-            current_sid = getattr(self, 'gena_sid', None)
-
-            if current_sid:
-                headers["SID"] = current_sid
-                logger.debug(f"Renewing GENA subscription lease for SID: {current_sid}")
-            else:
-                headers["CALLBACK"] = f"<http://{local_ip}:{local_port}/>"
-                headers["NT"] = "upnp:event"
-                logger.info(f"Sending initial SUBSCRIBE to: {event_url}")
-
-            try:
-                res = requests.request("SUBSCRIBE", event_url, headers=headers, timeout=5)
-
-                if res.status_code == 200:
-                    if not current_sid:
-                        self.gena_sid = res.headers.get('SID')
-                        logger.info(f"GENA subscription active. SID: {self.gena_sid}")
-                    else:
-                        logger.debug("GENA subscription lease renewed.")
-
-                    if getattr(self, 'use_gena', True):
-                        self.renewal_timer = threading.Timer(150.0, send_subscribe)
-                        self.renewal_timer.daemon = True
-                        self.renewal_timer.start()
-                else:
-                    logger.warning(f"GENA subscribe rejected ({res.status_code}). Falling back to polling.")
-                    self._start_local_monitor_thread()
-
-            except Exception as e:
-                logger.info(f"GENA handshake failed ({e}) -- renderer likely offline or doesn't support "
-                            f"eventing. Falling back to polling.")
-                self._start_local_monitor_thread()
-
-        # A short delay guarantees the HTTP server thread above is fully
-        # listening before we try to subscribe.
-        threading.Timer(1.0, send_subscribe).start()
-
-    def _start_local_monitor_thread(self):
-        """Background SOAP-polling fallback for renderers that reject GENA."""
-        logger.info("Launching background polling monitor thread.")
-        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self.monitor_thread.start()
 
     def save_playlist(self, playlist_name):
         """Generates a local server-compatible M3U file from the current queue tracks."""
@@ -520,39 +636,70 @@ class PlayQueue:
             logger.warning(f"Failed to add '{title}' to playlist '{playlist_name}': {e}")
             return {"ok": False, "added": False, "title": title}
 
-    def add_to_queue(self, track_item):
-        with self.lock:
-            self.queue.append(track_item)
-            logger.info(f"Queued: {track_item['title']}")
-            if self.current_idx == -1:
-                self.current_idx = 0
-        self._publish_queue_status()
 
-    def play_now(self, track_item):
-        with self.lock:
-            insert_pos = self.current_idx + 1 if self.current_idx != -1 else 0
-            self.queue.insert(insert_pos, track_item)
-            self.current_idx = insert_pos
-            self._play_current()
-        self._publish_queue_status()
+class PlaybackSession:
+    """Renderer-bound playback session: GENA/polling monitoring and every
+    call that actually pushes a URI to a renderer. Takes a Queue and asks
+    it what track should be current via advance()/retreat()/jump_to()/
+    prepare_for_play() -- those calls never touch the renderer
+    themselves, so this class is the only place that decides whether/how
+    to act on the result.
+
+    Never raises on renderer failure -- a rejected or unreachable
+    renderer is expected, not exceptional; methods return True/False and
+    log/publish instead."""
+
+    def __init__(self, renderer, queue):
+        self.renderer = renderer
+        self.queue = queue
+
+        self.running = True
+        self.state_lock = threading.Lock()
+        self.was_playing = False
+
+        # =====================================================================
+        # EXPERIMENTAL TOGGLE: Set to True to override monitor loop with GENA
+        # =====================================================================
+        self.use_gena = True
+
+        # Reference to the running GENA HTTPServer, if any, so shutdown()
+        # can actually stop it and release its port -- without this, the
+        # listener from a previous renderer selection stays bound forever,
+        # and every renderer switch after the first one silently loses
+        # GENA (falls back to polling) because the port is still taken.
+        self.gena_server = None
+
+    # ------------------------------------------------------------------
+    # Playback -- reads queue state via Queue's data methods, then acts
+    # on the renderer based on what comes back
+    # ------------------------------------------------------------------
+
+    def _start_playback(self, track):
+        """Pushes `track` to the renderer and publishes now_playing.
+        Caller (play/play_now/next/prev/play_at/remove_at) is
+        responsible for getting the track from the Queue first."""
+        self.was_playing = False
+        ok = self.renderer.play_uri(track['uri'], track['title'])
+        if ok:
+            self.was_playing = True
+            logger.info(f"Now playing: {track['title']}")
+        else:
+            logger.warning(
+                f"Could not start playback for '{track['title']}' -- "
+                f"renderer '{self.renderer.friendly_name}' may be offline."
+            )
+        events.publish("now_playing", {"title": track['title'], "ok": ok})
 
     def play(self):
-        with self.lock:
-            if not self.queue:
-                logger.info("Play requested but queue is empty.")
-                return
-            if self.shuffle_enabled and self.shuffle_exhausted:
-                # A full shuffle pass just finished (see _shuffle_next()).
-                # Start a genuinely fresh pass -- a new random pick --
-                # rather than just replaying whatever track happened to
-                # be current when the pass ended.
-                self.shuffle_exhausted = False
-                self.current_idx = random.choice(range(len(self.queue)))
-                logger.info("Shuffle: starting a fresh pass.")
-            elif self.current_idx == -1:
-                self.current_idx = 0
-            self._play_current()
-        self._publish_queue_status()
+        track = self.queue.prepare_for_play()
+        if track is None:
+            logger.info("Play requested but queue is empty.")
+            return
+        self._start_playback(track)
+
+    def play_now(self, track_item):
+        track = self.queue.insert_and_select(track_item)
+        self._start_playback(track)
 
     def pause(self):
         ok = self.renderer.pause()
@@ -581,114 +728,148 @@ class PlayQueue:
         ok = self.renderer.stop()
         if not ok:
             logger.debug("Stop command did not reach renderer (likely already offline).")
-        self._publish_queue_status()
         return ok
 
     def next(self):
-        with self.lock:
-            if self.shuffle_enabled:
-                if self.shuffle_exhausted:
-                    # This pass already finished (see _shuffle_next()).
-                    # Deliberately stays a no-op here -- only an explicit
-                    # Play starts a fresh pass (see play()). If Next also
-                    # silently restarted it, repeatedly clicking Next
-                    # would function as an implicit auto-loop, which is
-                    # specifically not wanted.
-                    logger.info("Shuffle: this pass is finished -- press Play to start a fresh one.")
-                else:
-                    self._shuffle_next()
-            elif self.current_idx + 1 < len(self.queue):
-                self.current_idx += 1
-                self._play_current()
-            else:
-                logger.info("End of play queue reached.")
-                self.stop()
-        self._publish_queue_status()
-
-    def _shuffle_next(self):
-        """Caller must hold self.lock. Marks the current track as played,
-        then randomly picks one of whatever's left. Once everything has
-        been played, stops (no auto-loop, matching linear next()'s
-        end-of-queue behavior), clears shuffle_history, and sets
-        shuffle_exhausted -- see play()'s check, the only thing that
-        clears that flag and starts a fresh pass."""
-        self._mark_played_for_shuffle(self.current_idx)
-        remaining = [i for i in range(len(self.queue)) if i not in self.shuffle_history]
-        if not remaining:
-            logger.info("Shuffle: all tracks in the queue have been played.")
-            self.shuffle_history = []
-            self.shuffle_exhausted = True
-            self.stop()
+        result = self.queue.advance()
+        if result.get("no_op"):
             return
-        self.current_idx = random.choice(remaining)
-        self._play_current()
+        if result["track"] is not None:
+            self._start_playback(result["track"])
+        elif result["stop"]:
+            self.stop()
 
     def prev(self):
-        with self.lock:
-            if self.shuffle_enabled:
-                if self.shuffle_history:
-                    self.current_idx = self.shuffle_history.pop()
-                    self._play_current()
-                else:
-                    # Empty history covers both "nothing played yet" and
-                    # "a pass just finished" (shuffle_history is cleared
-                    # on exhaustion) -- correctly a no-op either way, and
-                    # deliberately doesn't touch shuffle_exhausted so a
-                    # follow-up Play still starts a fresh pass correctly.
-                    logger.info("No earlier shuffle history to go back to.")
-            elif self.current_idx > 0:
-                self.current_idx -= 1
-                self._play_current()
-            else:
-                logger.info("Already at the first track.")
-        self._publish_queue_status()
+        result = self.queue.retreat()
+        if result.get("no_op"):
+            return
+        if result["track"] is not None:
+            self._start_playback(result["track"])
 
-    def clear(self):
-        with self.lock:
+    def play_at(self, index):
+        """Jumps directly to a specific queue position and plays it --
+        used when the user clicks a track in the queue panel."""
+        result = self.queue.jump_to(index)
+        if not result["ok"]:
+            return False
+        self._start_playback(result["track"])
+        return True
+
+    def remove_at(self, index):
+        """Removes a track from the queue and, if that affects what's
+        currently playing, tells the renderer accordingly (advance to
+        the track that slid into its place, or stop if there's nothing
+        left)."""
+        result = self.queue.remove_at(index)
+        if not result["ok"]:
+            return False
+        if result["should_stop"]:
             self.stop()
-            self.queue.clear()
-            self.current_idx = -1
-            self.shuffle_history = []
-            self.shuffle_exhausted = False
-            logger.info("Queue cleared.")
-        self._publish_queue_status()
+        elif result["advance_track"] is not None:
+            self._start_playback(result["advance_track"])
+        return True
 
-    def get_current_track(self):
-        with self.lock:
-            if 0 <= self.current_idx < len(self.queue):
-                return self.queue[self.current_idx]
-            return None
+    # ------------------------------------------------------------------
+    # GENA subscription plumbing
+    # ------------------------------------------------------------------
 
-    def display_queue(self):
-        """CLI-only pretty-printer."""
-        with self.lock:
-            print("\n" + "=" * 50)
-            print(" 🎶 CURRENT PLAY QUEUE:")
-            print("=" * 50)
-            if not self.queue:
-                print("   (Queue is empty)")
+    def _get_local_ip(self):
+        """Forces finding the real local IP interface facing the renderer."""
+        try:
+            from urllib.parse import urlparse
+
+            event_url = getattr(self.renderer, 'avtransport_event_url', "")
+            if event_url:
+                target_host = urlparse(event_url).hostname
             else:
-                for idx, track in enumerate(self.queue):
-                    prefix = "➔ ▶ " if idx == self.current_idx else "    "
-                    print(f"{prefix}{idx + 1}. {track['title']}")
-            print("=" * 50)
+                target_host = self.renderer.host
 
-    def _play_current(self):
-        """Caller must already hold self.lock."""
-        if 0 <= self.current_idx < len(self.queue):
-            track = self.queue[self.current_idx]
-            self.was_playing = False
+            if not target_host or target_host.lower() == "unknown":
+                return "0.0.0.0"
 
-            ok = self.renderer.play_uri(track['uri'], track['title'])
-            if ok:
-                self.was_playing = True
-                logger.info(f"Now playing: {track['title']}")
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((target_host, 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except Exception as e:
+            logger.debug(f"Auto-IP detection failed: {e}")
+            return "0.0.0.0"
+
+    def _start_gena_listener(self):
+        """Spins up the HTTP backend and sends the SUBSCRIBE packet safely."""
+        local_ip = self._get_local_ip()
+        local_port = 8089  # Choose any open port on your system
+
+        logger.info(f"Local GENA listener binding to: http://{local_ip}:{local_port}")
+        if local_ip in ["0.0.0.0", "127.0.0.1"]:
+            logger.warning("Local IP resolved to loopback -- renderer won't be able to route events back here.")
+
+        def run_server():
+            try:
+                server = HTTPServer((local_ip, local_port), GENAEventHTTPHandler)
+                server.play_queue = self
+                self.gena_server = server
+                server.serve_forever()
+            except Exception as e:
+                logger.warning(f"GENA background server failed to start: {e}. Falling back to polling.")
+                self._start_local_monitor_thread()
+
+        threading.Thread(target=run_server, daemon=True).start()
+
+        def send_subscribe():
+            event_url = getattr(self.renderer, 'avtransport_event_url', None)
+            if not event_url:
+                self._start_local_monitor_thread()
+                return
+
+            headers = {
+                "HOST": event_url.split("://")[1].split("/")[0],
+                "TIMEOUT": "Second-300"
+            }
+
+            current_sid = getattr(self, 'gena_sid', None)
+
+            if current_sid:
+                headers["SID"] = current_sid
+                logger.debug(f"Renewing GENA subscription lease for SID: {current_sid}")
             else:
-                logger.warning(
-                    f"Could not start playback for '{track['title']}' -- "
-                    f"renderer '{self.renderer.friendly_name}' may be offline."
-                )
-            events.publish("now_playing", {"title": track['title'], "ok": ok})
+                headers["CALLBACK"] = f"<http://{local_ip}:{local_port}/>"
+                headers["NT"] = "upnp:event"
+                logger.info(f"Sending initial SUBSCRIBE to: {event_url}")
+
+            try:
+                res = requests.request("SUBSCRIBE", event_url, headers=headers, timeout=5)
+
+                if res.status_code == 200:
+                    if not current_sid:
+                        self.gena_sid = res.headers.get('SID')
+                        logger.info(f"GENA subscription active. SID: {self.gena_sid}")
+                    else:
+                        logger.debug("GENA subscription lease renewed.")
+
+                    if getattr(self, 'use_gena', True):
+                        self.renewal_timer = threading.Timer(150.0, send_subscribe)
+                        self.renewal_timer.daemon = True
+                        self.renewal_timer.start()
+                else:
+                    logger.warning(f"GENA subscribe rejected ({res.status_code}). Falling back to polling.")
+                    self._start_local_monitor_thread()
+
+            except Exception as e:
+                logger.info(f"GENA handshake failed ({e}) -- renderer likely offline or doesn't support "
+                            f"eventing. Falling back to polling.")
+                self._start_local_monitor_thread()
+
+        # A short delay guarantees the HTTP server thread above is fully
+        # listening before we try to subscribe.
+        threading.Timer(1.0, send_subscribe).start()
+
+    def _start_local_monitor_thread(self):
+        """Background SOAP-polling fallback for renderers that reject GENA."""
+        logger.info("Launching background polling monitor thread.")
+        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.monitor_thread.start()
 
     def _monitor_loop(self):
         """Background thread loop verifying track status every second.
@@ -723,7 +904,7 @@ class PlayQueue:
 
     def shutdown(self):
         """Cleans up background assets on application close or renderer switch."""
-        logger.info("Tearing down PlayQueue resources.")
+        logger.info("Tearing down PlaybackSession resources.")
         if hasattr(self, 'renewal_timer'):
             self.renewal_timer.cancel()
 
@@ -735,7 +916,7 @@ class PlayQueue:
                 # listener's own thread) has actually exited, then
                 # server_close() releases the socket -- by the time this
                 # returns, the port is genuinely free for the next
-                # PlayQueue's GENA listener to bind to. Must be called
+                # session's GENA listener to bind to. Must be called
                 # from a different thread than serve_forever() is
                 # running on, which is always true here (this runs on
                 # whatever thread triggered the renderer switch).
@@ -746,3 +927,56 @@ class PlayQueue:
                 logger.warning(f"Error stopping GENA listener (port may remain briefly held): {e}")
             finally:
                 self.gena_server = None
+
+
+class PlayQueue:
+    """Backward-compatible facade combining a Queue + PlaybackSession
+    under the original combined API, so the CLI (controller.py,
+    main.py, dlnabrowser.py) doesn't need any changes. The web app
+    (state.py/app.py) uses Queue and PlaybackSession directly instead,
+    since it needs them decoupled."""
+
+    def __init__(self, renderer, *args, **kwargs):
+        self._queue = Queue()
+        self._session = PlaybackSession(renderer, self._queue)
+
+    @property
+    def renderer(self):
+        return self._session.renderer
+
+    def start_monitoring(self):
+        self._session.start_monitoring()
+
+    def get_current_track(self):
+        return self._queue.get_current_track()
+
+    def display_queue(self):
+        self._queue.display_queue()
+
+    def add_to_queue(self, track_item):
+        self._queue.add_to_queue(track_item)
+
+    def next(self):
+        self._session.next()
+
+    def prev(self):
+        self._session.prev()
+
+    def toggle_play(self):
+        self._session.toggle_play()
+
+    def stop(self):
+        self._session.stop()
+
+    def clear(self):
+        self._session.stop()
+        self._queue.clear()
+
+    def save_playlist(self, playlist_name):
+        return self._queue.save_playlist(playlist_name)
+
+    def load_playlist(self, playlist_name):
+        return self._queue.load_playlist(playlist_name)
+
+    def shutdown(self):
+        self._session.shutdown()

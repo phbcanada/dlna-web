@@ -33,7 +33,7 @@ import logging
 
 from dlnarenderer import DLNARenderer
 from dlnabrowser import DLNABrowser
-from playqueue import PlayQueue
+from playqueue import Queue, PlaybackSession
 from events import events
 import config as cfgmod
 
@@ -86,7 +86,20 @@ class AppState:
     def __init__(self):
         self.renderer = DLNARenderer()
         self.browser = DLNABrowser()
-        self.queue = None  # created once a renderer is selected
+
+        # The queue is long-lived and renderer-independent -- created
+        # once here and never replaced. Browsing, queueing, reordering,
+        # and playlist management all work against this regardless of
+        # whether a renderer is currently attached. Only `session`
+        # (below) comes and goes with renderer selection/loss.
+        self.queue = Queue()
+
+        # The active renderer session (GENA/polling + transport
+        # commands). None whenever no renderer is selected/reachable --
+        # routes that need to actually push playback to a device should
+        # guard on this (see app.py's _require_session()), while queue
+        # mutation routes don't need to guard on anything.
+        self.session = None
 
         self.config = cfgmod.load_config()
 
@@ -139,13 +152,20 @@ class AppState:
         new_renderer.resolve_control_url(desc_url)  # raises if unreachable
 
         with self._state_lock:
-            if self.queue:
-                self.queue.shutdown()
+            if self.session:
+                self.session.shutdown()
             self.renderer = new_renderer
-            self.queue = PlayQueue(self.renderer)
-            self.queue.start_monitoring()
+            self.session = PlaybackSession(self.renderer, self.queue)
+            self.session.start_monitoring()
             self.renderer_connected = True
             self.renderer_last_seen = time.time()
+
+        # Per the agreed design: a (re)selected renderer always starts
+        # from a clean slate, same as reaching the end of the queue --
+        # no attempt to resume wherever the queue's current_idx happened
+        # to be under a previous (or lost) session, and nothing here
+        # auto-plays. The queue's contents themselves are untouched.
+        self.queue.reset_position()
 
         self.config["renderer_desc_url"] = desc_url
         cfgmod.save_config(self.config)
@@ -337,7 +357,7 @@ class AppState:
         (per the brief: renderers aren't always on). Rather than give up,
         keep trying quietly in the background until it appears -- or until
         the person picks a different renderer, which naturally supersedes
-        this loop since a new PlayQueue/renderer gets installed."""
+        this loop since a new session/renderer gets installed."""
         def retry_loop():
             while not self._ticker_stop.is_set():
                 time.sleep(RETRY_INTERVAL_SECONDS)
@@ -383,10 +403,9 @@ class AppState:
         transport_state = renderer.get_transport_state()
         if transport_state in ACTIVE_TRANSPORT_STATES:
             pos = dict(renderer.get_position_info())
-            if self.queue:
-                current = self.queue.current_track()
-                if current and current.get("artist"):
-                    pos["artist"] = current["artist"]
+            current = self.queue.current_track()
+            if current and current.get("artist"):
+                pos["artist"] = current["artist"]
         else:
             pos = dict(IDLE_POSITION)
         pos["transport_state"] = transport_state
@@ -444,26 +463,34 @@ class AppState:
         """Called from the ticker once a selected renderer has been
         continuously unreachable for RENDERER_LOST_TIMEOUT_SECONDS. Gives
         up on it entirely rather than polling forever: tears down its
-        PlayQueue (which also stops that renderer's own GENA/polling
-        background threads -- see PlayQueue.shutdown()), clears it as the
-        active renderer so the ticker goes idle instead of continuing to
-        hammer a dead host, and tells the UI to send the person back to
-        the renderer picker. Deliberately does NOT touch the saved
-        config entry -- that's only rewritten on an explicit new
-        selection, so if this same renderer comes back later it's still
-        one click away in the picker rather than gone from history."""
+        PlaybackSession (which also stops that renderer's own GENA/polling
+        background threads -- see PlaybackSession.shutdown()), clears it
+        as the active renderer so the ticker goes idle instead of
+        continuing to hammer a dead host, resets the queue's playback
+        position (see Queue.reset_position()), and tells the UI to send
+        the person back to the renderer picker. The queue's *contents*
+        are untouched -- only position resets. Deliberately does NOT
+        touch the saved config entry -- that's only rewritten on an
+        explicit new selection, so if this same renderer comes back
+        later it's still one click away in the picker rather than gone
+        from history."""
         logger.warning(
             f"Renderer '{renderer.friendly_name}' has been unreachable for "
             f"{RENDERER_LOST_TIMEOUT_SECONDS:.0f}s -- giving up on it. "
             f"Select a renderer from the list to resume."
         )
         with self._state_lock:
-            if self.queue:
-                self.queue.shutdown()
-                self.queue = None
+            if self.session:
+                self.session.shutdown()
+                self.session = None
             self.renderer = DLNARenderer()
             self.renderer_connected = False
             self._unreachable_since = None
+
+        # Same clean-slate reset as a fresh renderer selection -- see
+        # select_renderer(). Queue contents survive; playback position
+        # does not carry over to whatever renderer comes next.
+        self.queue.reset_position()
 
         events.publish("renderer_lost", {
             "friendly_name": renderer.friendly_name,

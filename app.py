@@ -118,7 +118,7 @@ def api_library_status():
 
 @app.route("/api/status")
 def api_status():
-    q_snapshot = state.queue.snapshot() if state.queue else {"queue": [], "current_idx": -1}
+    q_snapshot = state.queue.snapshot()
     position = None
     if state.renderer and state.renderer.control_url:
         # Shared with the live ticker (see state.get_display_position) so a
@@ -280,25 +280,24 @@ def api_browse_back():
 # ----------------------------------------------------------------------
 # Queue
 # ----------------------------------------------------------------------
+# Queue mutation routes (add/remove/clear/shuffle/playlists) need no
+# guard at all -- state.queue always exists, renderer or not. Only the
+# transport routes below (play/play_at/toggle/next/prev/stop) need a
+# renderer session to actually act on, guarded by _require_session().
 
-def _require_queue():
-    if not state.queue:
+def _require_session():
+    if not state.session:
         return jsonify({"error": "No renderer selected yet."}), 409
     return None
 
 
 @app.route("/api/queue")
 def api_queue():
-    if not state.queue:
-        return jsonify({"queue": [], "current_idx": -1})
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/add", methods=["POST"])
 def api_queue_add():
-    err = _require_queue()
-    if err:
-        return err
     data = request.get_json(force=True, silent=True) or {}
     title, uri = data.get("title"), data.get("uri")
     if not title or not uri:
@@ -311,9 +310,6 @@ def api_queue_add():
 
 @app.route("/api/queue/add_current_folder", methods=["POST"])
 def api_queue_add_folder():
-    err = _require_queue()
-    if err:
-        return err
     items = state.browser.browse_container(state.browser.current_id)
     file_items = [(t, d) for t, d in items if t == "file"]
 
@@ -345,9 +341,6 @@ def api_queue_add_specific_folder():
     *child* row without navigating the browse panel into it. Distinct
     from api_queue_add_folder() above (the "Queue All" button, which
     always means the currently-browsed folder)."""
-    err = _require_queue()
-    if err:
-        return err
     data = request.get_json(force=True, silent=True) or {}
     folder_id = data.get("id")
     folder_title = data.get("title", "")
@@ -395,89 +388,94 @@ def api_queue_add_specific_folder():
 
 @app.route("/api/queue/play", methods=["POST"])
 def api_queue_play():
-    err = _require_queue()
+    err = _require_session()
     if err:
         return err
-    state.queue.play()
+    state.session.play()
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/play_at", methods=["POST"])
 def api_queue_play_at():
-    err = _require_queue()
+    err = _require_session()
     if err:
         return err
     data = request.get_json(force=True, silent=True) or {}
     idx = data.get("index")
     if idx is None:
         return jsonify({"error": "index is required"}), 400
-    ok = state.queue.play_at(int(idx))
+    ok = state.session.play_at(int(idx))
     return jsonify({"ok": ok, **state.queue.snapshot()})
 
 
 @app.route("/api/queue/remove", methods=["POST"])
 def api_queue_remove():
-    err = _require_queue()
-    if err:
-        return err
+    # No session guard: removing a track is a queue mutation, not a
+    # playback command. If a session is attached and the removal affects
+    # what's currently playing, PlaybackSession.remove_at() handles
+    # telling the renderer; if there's no session, we just mutate the
+    # queue directly and nothing plays.
     data = request.get_json(force=True, silent=True) or {}
     idx = data.get("index")
     if idx is None:
         return jsonify({"error": "index is required"}), 400
-    ok = state.queue.remove_at(int(idx))
+    if state.session:
+        ok = state.session.remove_at(int(idx))
+    else:
+        ok = state.queue.remove_at(int(idx))["ok"]
     return jsonify({"ok": ok, **state.queue.snapshot()})
 
 
 @app.route("/api/queue/toggle", methods=["POST"])
 def api_queue_toggle():
-    err = _require_queue()
+    err = _require_session()
     if err:
         return err
-    state.queue.toggle_play()
+    state.session.toggle_play()
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/next", methods=["POST"])
 def api_queue_next():
-    err = _require_queue()
+    err = _require_session()
     if err:
         return err
-    state.queue.next()
+    state.session.next()
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/prev", methods=["POST"])
 def api_queue_prev():
-    err = _require_queue()
+    err = _require_session()
     if err:
         return err
-    state.queue.prev()
+    state.session.prev()
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/stop", methods=["POST"])
 def api_queue_stop():
-    err = _require_queue()
+    err = _require_session()
     if err:
         return err
-    state.queue.stop()
+    state.session.stop()
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/clear", methods=["POST"])
 def api_queue_clear():
-    err = _require_queue()
-    if err:
-        return err
+    # No session guard: clearing the queue is a queue mutation and
+    # should work with no renderer attached. If a session exists, stop
+    # it first so playback doesn't keep running against a now-cleared
+    # queue.
+    if state.session:
+        state.session.stop()
     state.queue.clear()
     return jsonify(state.queue.snapshot())
 
 
 @app.route("/api/queue/shuffle", methods=["POST"])
 def api_queue_shuffle():
-    err = _require_queue()
-    if err:
-        return err
     data = request.get_json(force=True, silent=True) or {}
     enabled = data.get("enabled")
     if enabled is None:
@@ -501,9 +499,6 @@ def api_playlists_list():
 
 @app.route("/api/playlists/save", methods=["POST"])
 def api_playlists_save():
-    err = _require_queue()
-    if err:
-        return err
     data = request.get_json(force=True, silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -514,9 +509,6 @@ def api_playlists_save():
 
 @app.route("/api/playlists/load", methods=["POST"])
 def api_playlists_load():
-    err = _require_queue()
-    if err:
-        return err
     data = request.get_json(force=True, silent=True) or {}
     name = (data.get("name") or "").strip()
     if not name:
@@ -544,9 +536,6 @@ def api_playlists_add_track():
     """Appends a single queue track (by index) to the active playlist --
     distinct from /api/playlists/save, which snapshots the whole queue.
     Used by each queue row's "+" button."""
-    err = _require_queue()
-    if err:
-        return err
     name = state.active_playlist
     if not name:
         return jsonify({"error": "No active playlist selected."}), 409
