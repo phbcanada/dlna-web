@@ -296,11 +296,15 @@ class DLNARenderer:
         headers = {"Content-Type": 'text/xml; charset="utf-8"', "Connection": "close"}
         try:
             headers["SOAPACTION"] = f'"{self.NS_AVT}#SetAVTransportURI"'
-            r1 = requests.post(self.control_url, data=set_uri_soap, headers=headers, timeout=5)
+            # Bumped from 5s -- some renderers (GGMM in particular) can be
+            # slow to acknowledge this right after being told to load a
+            # new URI, seemingly while they (or the media server they're
+            # pulling from) are still fetching data for it.
+            r1 = requests.post(self.control_url, data=set_uri_soap, headers=headers, timeout=10)
             r1.raise_for_status()
 
             headers["SOAPACTION"] = f'"{self.NS_AVT}#Play"'
-            r2 = requests.post(self.control_url, data=play_soap, headers=headers, timeout=5)
+            r2 = requests.post(self.control_url, data=play_soap, headers=headers, timeout=10)
             r2.raise_for_status()
             return True
         except Exception as e:
@@ -351,7 +355,11 @@ class DLNARenderer:
             "Connection": "close"
         }
         try:
-            r = requests.post(self.control_url, data=soap, headers=headers, timeout=2)
+            # Bumped from 2s -- this is also what the new stopped-
+            # notification probe calls (see PlaybackSession.
+            # handle_stopped_notification()), right when the renderer may
+            # still be busy settling in from a track change.
+            r = requests.post(self.control_url, data=soap, headers=headers, timeout=6)
             r.raise_for_status()
             root = ET.fromstring(r.content)
             state_node = root.find(".//CurrentTransportState")
@@ -382,7 +390,9 @@ class DLNARenderer:
         }
 
         try:
-            r = requests.post(self.control_url, data=soap, headers=headers, timeout=2)
+            # Bumped from 2s -- same "renderer/media-server briefly slow
+            # right after a track change" reasoning as get_transport_state().
+            r = requests.post(self.control_url, data=soap, headers=headers, timeout=6)
             r.raise_for_status()
             root = ET.fromstring(r.content)
 

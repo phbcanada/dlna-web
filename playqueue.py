@@ -130,9 +130,11 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
 
                                 elif state in ("STOPPED", "NO_MEDIA_PRESENT", "PAUSED_PLAYBACK"):
                                     if current_was_playing and state != "PAUSED_PLAYBACK":
-                                        session.was_playing = False
-                                        gena_logger.info("Track ended -- advancing queue.")
-                                        session.next()
+                                        gena_logger.info(
+                                            "Playing -> stopped notification received -- "
+                                            "confirming with the renderer before advancing queue."
+                                        )
+                                        session.handle_stopped_notification()
 
         except Exception as e:
             gena_logger.warning(f"GENA event parsing error: {e}")
@@ -738,6 +740,31 @@ class PlaybackSession:
             self._start_playback(result["track"])
         elif result["stop"]:
             self.stop()
+
+    def handle_stopped_notification(self):
+        """Called by the GENA handler when a NOTIFY reports the
+        transport moving from playing to stopped -- rather than trusting
+        that immediately, re-confirms with a fresh GetTransportInfo
+        probe before advancing the queue. Some renderers (the GGMM
+        speaker in particular) have shown NOTIFYs that no longer match
+        the device's actual state by the time we process them -- likely
+        the device (or the media server it's pulling from) being slow
+        to respond right after being told to load a new track. Only
+        advances if the probe still shows stopped; if it shows the
+        renderer is actually playing/transitioning, treats the
+        notification as stale and leaves it alone for whatever real
+        event comes next to sort out."""
+        self.was_playing = False
+        confirmed_state = self.renderer.get_transport_state()
+        if confirmed_state in ("PLAYING", "TRANSITIONING"):
+            logger.info(
+                f"Stopped-notification probe found the renderer actually "
+                f"{confirmed_state} -- treating the notification as stale, not advancing."
+            )
+            self.was_playing = True
+            return
+        logger.info(f"Stopped-notification probe confirmed {confirmed_state} -- advancing queue.")
+        self.next()
 
     def prev(self):
         result = self.queue.retreat()
