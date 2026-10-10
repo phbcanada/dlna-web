@@ -95,7 +95,7 @@ RestartSec=5
 # runs unprivileged, no manual `touch`/`chown` needed. It does mean the
 # file ends up root-owned: readable by pi with normal permissions, but
 # you'd need sudo to delete or rotate it by hand. It also grows forever
-# on its own; pair this with logrotate (see README_WEB.md) if you want
+# on its own; pair this with logrotate (see README.md) if you want
 # it capped -- a daily rotation with a handful of kept copies is plenty
 # for a service this size.
 StandardOutput=append:/var/log/dlna-web.log

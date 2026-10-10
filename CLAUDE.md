@@ -94,4 +94,3 @@ Key invariants:
 - **Occasional renderer disconnects around midnight.** Cause unknown. Candidates: Pi scheduled timers, router maintenance windows, GGMM idle/standby. The next step is evidence (an overnight independent ping test or logging), not a fix.
 - **Waitress SSE thread starvation.** Each open `/api/stream` holds a waitress thread permanently; the default pool is 4 and the service doesn't pass `--threads`. Raising it to 8 is a one-line change, but Paul wants SSE connection-count logging to confirm the problem first. Not urgent.
 - **AirPlay output** has been researched (pyatv, cliraop/libraop, airbridge as reference). A small relay using cliraop as a subprocess looked tractable. No decision has been made.
-- Minor: `app.py`, `state.py`, and `dlna-web.service` refer to `README_WEB.md`, but the file is `README.md`.

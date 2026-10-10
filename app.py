@@ -617,5 +617,5 @@ if __name__ == "__main__":
     host = args.host if args.host is not None else os.environ.get("DLNA_WEB_HOST", "0.0.0.0")
 
     logger.info(f"Starting Flask dev server on {host}:{port} ...")
-    logger.info("(For a boot-time deployment, run this under waitress + systemd instead -- see README_WEB.md)")
+    logger.info("(For a boot-time deployment, run this under waitress + systemd instead -- see README.md)")
     app.run(host=host, port=port, threaded=True, debug=False)

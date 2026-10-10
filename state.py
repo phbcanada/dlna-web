@@ -282,7 +282,7 @@ class AppState:
         if not desc_url:
             msg = (
                 f"{MEDIA_SERVER_ENV_VAR} is not set -- configure it and restart "
-                f"the service. See dlna-web.service / README_WEB.md."
+                f"the service. See dlna-web.service / README.md."
             )
             logger.error(msg)
             self.library_error = msg
