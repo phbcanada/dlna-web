@@ -29,6 +29,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse
 import re
 import os
+import html
 import logging
 
 logger = logging.getLogger("dlnabrowser")
@@ -103,6 +104,10 @@ class DLNABrowser:
         self.current_id = "0"
         self.current_title = "Root"
         self.cache = {}
+        # uri -> the media server's own <res> attributes for that file
+        # (protocolInfo, duration, size, bitrate, ...), forwarded to the
+        # renderer at play time -- see res_attrs_for_uri().
+        self.res_attrs_by_uri = {}
 
     @staticmethod
     def get_friendly_name(desc_url):
@@ -188,6 +193,7 @@ class DLNABrowser:
         self.current_id = "0"
         self.current_title = "Root"
         self.cache = {}
+        self.res_attrs_by_uri = {}
         return self._fetch_control_url()
 
     def select_server(self):
@@ -291,7 +297,6 @@ class DLNABrowser:
             if not result_xml:
                 match = re.search(r'<Result>(.*?)</Result>', r.text, re.DOTALL)
                 if match:
-                    import html
                     result_xml = html.unescape(match.group(1))
 
             if not result_xml:
@@ -312,6 +317,13 @@ class DLNABrowser:
                         uri = res_node.text if res_node is not None else ""
                         protocol_info = res_node.attrib.get('protocolInfo') if res_node is not None else None
                         duration_seconds = parse_didl_duration(res_node.attrib.get('duration')) if res_node is not None else None
+                        if res_node is not None and uri:
+                            # Plain attributes only -- a namespaced one
+                            # (e.g. dlna:profileID) would come back as
+                            # "{ns}name" and can't be re-emitted as-is.
+                            self.res_attrs_by_uri[uri] = {
+                                k: v for k, v in res_node.attrib.items() if not k.startswith('{')
+                            }
                         class_node = el.find(f'{{{self.NS_DIDL_UPNP}}}class')
                         upnp_class = class_node.text if class_node is not None else None
                         # upnp:artist is the standard performer tag; some
@@ -347,6 +359,9 @@ class DLNABrowser:
                     pi_match = re.search(r'protocolInfo="([^"]*)"', res_attrs)
                     protocol_info = pi_match.group(1) if pi_match else None
                     dur_match = re.search(r'duration="([^"]*)"', res_attrs)
+                    self.res_attrs_by_uri[furi] = {
+                        k: html.unescape(v) for k, v in re.findall(r'([A-Za-z][\w.-]*)="([^"]*)"', res_attrs)
+                    }
                     items.append(('file', {
                         'id': fid, 'title': ftitle, 'artist': uartist or dcreator or None, 'uri': furi,
                         'media_type': classify_media_type(uclass or None, protocol_info),
@@ -359,6 +374,13 @@ class DLNABrowser:
         except Exception as e:
             logger.warning(f"Browse error on container '{container_id}' (media server may be offline): {e}")
             return []
+
+    def res_attrs_for_uri(self, uri):
+        """The media server's <res> attributes for `uri`, or None if it
+        isn't in the crawled library. Looked up by URI rather than
+        carried on queue entries so tracks loaded from an M3U playlist
+        (which only stores title/URI/path) get them too."""
+        return self.res_attrs_by_uri.get(uri)
 
     def count_tracks(self, container_id):
         """Direct-child track count for a folder -- deliberately NOT

@@ -713,6 +713,12 @@ class PlaybackSession:
         # stays renderer/session-level and the CLI keeps working.
         self.on_volume_change = None
 
+        # Called with a track URI, returns the media server's <res>
+        # attributes for it (or None) to forward in SetAVTransportURI.
+        # Set by AppState to the browser's lookup; left None by the CLI
+        # facade, which keeps sending a bare <res>.
+        self.res_attrs_lookup = None
+
     # ------------------------------------------------------------------
     # Playback -- reads queue state via Queue's data methods, then acts
     # on the renderer based on what comes back
@@ -723,7 +729,8 @@ class PlaybackSession:
         Caller (play/play_now/next/prev/play_at/remove_at) is
         responsible for getting the track from the Queue first."""
         self.was_playing = False
-        ok = self.renderer.play_uri(track['uri'], track['title'])
+        res_attrs = self.res_attrs_lookup(track['uri']) if self.res_attrs_lookup else None
+        ok = self.renderer.play_uri(track['uri'], track['title'], res_attrs)
         if ok:
             self.was_playing = True
             logger.info(f"Now playing: {track['title']}")

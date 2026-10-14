@@ -61,6 +61,12 @@ class DLNARenderer:
         # (it's literally its own DLNA certification test point) that we
         # deliberately don't act on it yet; see get_sink_protocol_info().
         self.sink_protocol_info = []
+        # Diagnostics for renderers that report a wrong TrackDuration (the
+        # GGMM says 0:04:33 for everything and stops there): what we told
+        # it in res@duration, and the last TrackDuration it reported back,
+        # so get_position_info() logs only when that value changes.
+        self._sent_res_duration = None
+        self._last_reported_duration = None
 
     @property
     def host(self):
@@ -253,22 +259,34 @@ class DLNARenderer:
             except ValueError:
                 print("Please enter a valid integer or 'skip'.")
 
-    def play_uri(self, uri, title):
+    def play_uri(self, uri, title, res_attrs=None):
         """Tells the renderer to load and play the selected media URI.
         Returns True/False rather than raising, since a renderer that has
         gone to sleep or been powered off mid-session is a normal event,
-        not an application error."""
+        not an application error.
+
+        res_attrs: the media server's own <res> attributes for this file
+        (protocolInfo, duration, size, bitrate, ...), forwarded verbatim
+        the way other control points (BubbleUPnP, VLC) do. Without them
+        the renderer has to work out the length on its own, which the
+        GGMM gets wrong."""
         if not self.control_url:
             return False
 
         safe_title = html.escape(title)
         safe_uri = html.escape(uri)
+        # Escaped twice: once as a DIDL-Lite attribute value, then again
+        # because the whole DIDL document travels as text inside the SOAP
+        # envelope (the same reason its tags are written as &lt;/&gt;).
+        res_attr_str = "".join(
+            f' {k}="{html.escape(html.escape(str(v)))}"' for k, v in (res_attrs or {}).items()
+        )
 
         meta_didl = f"""&lt;DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"&gt;
   &lt;item id="0" parentID="0" restricted="1"&gt;
     &lt;dc:title&gt;{safe_title}&lt;/dc:title&gt;
     &lt;upnp:class&gt;object.item.audioItem.musicTrack&lt;/upnp:class&gt;
-    &lt;res&gt;{safe_uri}&lt;/res&gt;
+    &lt;res{res_attr_str}&gt;{safe_uri}&lt;/res&gt;
   &lt;/item&gt;
 &lt;/DIDL-Lite&gt;"""
 
@@ -292,6 +310,14 @@ class DLNARenderer:
     </u:Play>
   </s:Body>
 </s:Envelope>"""
+
+        self._sent_res_duration = (res_attrs or {}).get("duration")
+        self._last_reported_duration = None
+        logger.debug(
+            f"SetAVTransportURI metadata for '{title}' "
+            f"(res attributes {'forwarded' if res_attrs else 'NOT available -- bare res'}):\n"
+            f"{html.unescape(meta_didl)}"
+        )
 
         headers = {"Content-Type": 'text/xml; charset="utf-8"', "Connection": "close"}
         try:
@@ -398,6 +424,13 @@ class DLNARenderer:
 
             duration = root.find(".//TrackDuration").text or "00:00:00"
             position = root.find(".//RelTime").text or "00:00:00"
+            if duration != self._last_reported_duration:
+                # Polled every second by the ticker, so only log changes.
+                logger.debug(
+                    f"Renderer TrackDuration now {duration} "
+                    f"(was {self._last_reported_duration}; we sent res@duration={self._sent_res_duration})"
+                )
+                self._last_reported_duration = duration
 
             title = "Unknown"
             artist = None

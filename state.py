@@ -173,6 +173,7 @@ class AppState:
             self.renderer = new_renderer
             self.session = PlaybackSession(self.renderer, self.queue)
             self.session.on_volume_change = self._on_remote_volume_change
+            self.session.res_attrs_lookup = self.browser.res_attrs_for_uri
             self.session.start_monitoring()
             self.renderer_connected = True
             self.renderer_last_seen = time.time()
