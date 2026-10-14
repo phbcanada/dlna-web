@@ -761,6 +761,13 @@ class PlaybackSession:
         if state in ("PLAYING", "TRANSITIONING"):
             logger.info("Toggling: pausing playback.")
             self.pause()
+        elif state == "PAUSED_PLAYBACK":
+            # A bare Play continues from the paused position. Going
+            # through play() here would re-send SetAVTransportURI, which
+            # reloads the track and restarts it from 0:00.
+            logger.info("Toggling: resuming paused playback.")
+            if not self.renderer.resume():
+                logger.warning("Resume command failed -- renderer may be offline.")
         elif state == "UNKNOWN":
             logger.warning("Cannot toggle playback -- renderer is not responding.")
         else:
