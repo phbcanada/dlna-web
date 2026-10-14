@@ -73,6 +73,7 @@ Key invariants:
 
 - **GENA is unreliable in practice.** Polling fallbacks and confirmation probes are necessary for correctness.
 - **gmediarender quirk:** on `SetAVTransportURI` immediately after a track ends, its GStreamer pipeline emits a real `PLAYING` and then a spurious `STOPPED` 10–25 ms later. The client code was correct; the renderer was the anomaly. This is why `handle_stopped_notification()` re-probes `GetTransportInfo` before advancing. That probe has been live-tested against the GGMM.
+- **GGMM track duration:** given a bare `<res>` in `SetAVTransportURI`, the GGMM reports `TrackDuration` 0:04:33 for every track and stops playback there. `play_uri()` therefore forwards MiniDLNA's own `<res>` attributes (protocolInfo, duration, size, bitrate, ...), kept from the boot crawl and looked up by URI (`DLNABrowser.res_attrs_for_uri()`). With them, the GGMM shows the correct duration (confirmed on the LAN). At DEBUG, the log shows the DIDL sent and each change in the renderer's `TrackDuration` next to the `res@duration` we sent.
 - **Artist metadata:** gmediarender doesn't reliably echo artist via `GetPositionInfo`. Browse-time DIDL metadata is authoritative.
 - **MiniDLNA works over loopback** (`127.0.0.1:8200/rootDesc.xml`) despite its docs suggesting otherwise. Prefer loopback.
 - SSDP and GENA need the Pi's real LAN interface. No Docker NAT.
