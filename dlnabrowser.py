@@ -69,6 +69,25 @@ def classify_media_type(upnp_class, protocol_info):
     return "other"
 
 
+_DIDL_DURATION_RE = re.compile(r'^\s*(\d+):(\d{1,2}):(\d{1,2})(?:\.\d+(?:/\d+)?)?\s*$')
+
+
+def parse_didl_duration(value):
+    """Whole seconds from a DIDL-Lite res@duration value, or None if it's
+    missing or unparseable. The spec format is H+:MM:SS[.F+ or .F0/F1]
+    (MiniDLNA sends e.g. "0:05:55.123"); the fraction is dropped since
+    it's only ever displayed. This is the media server's own value from
+    its scan of the file -- independent of whatever TrackDuration a
+    renderer chooses to report during playback."""
+    if not value:
+        return None
+    m = _DIDL_DURATION_RE.match(value)
+    if not m:
+        return None
+    h, mins, secs = (int(g) for g in m.groups())
+    return h * 3600 + mins * 60 + secs
+
+
 class DLNABrowser:
     """Handles parsing the media tree from UPnP/DLNA media servers."""
     DEFAULT_DESC_URL = "http://192.168.132.5:8200/rootDesc.xml"
@@ -292,6 +311,7 @@ class DLNABrowser:
                         res_node = el.find('{urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/}res')
                         uri = res_node.text if res_node is not None else ""
                         protocol_info = res_node.attrib.get('protocolInfo') if res_node is not None else None
+                        duration_seconds = parse_didl_duration(res_node.attrib.get('duration')) if res_node is not None else None
                         class_node = el.find(f'{{{self.NS_DIDL_UPNP}}}class')
                         upnp_class = class_node.text if class_node is not None else None
                         # upnp:artist is the standard performer tag; some
@@ -308,6 +328,7 @@ class DLNABrowser:
                             'artist': artist,
                             'uri': uri,
                             'media_type': classify_media_type(upnp_class, protocol_info),
+                            'duration_seconds': duration_seconds,
                         }))
             except Exception:
                 folders = re.findall(r'<container\s+id="([^"]+)"[^>]*>.*?<dc:title>([^<]+)</dc:title>', result_xml, re.DOTALL)
@@ -325,9 +346,11 @@ class DLNABrowser:
                 for fid, ftitle, uartist, dcreator, uclass, res_attrs, furi in files:
                     pi_match = re.search(r'protocolInfo="([^"]*)"', res_attrs)
                     protocol_info = pi_match.group(1) if pi_match else None
+                    dur_match = re.search(r'duration="([^"]*)"', res_attrs)
                     items.append(('file', {
                         'id': fid, 'title': ftitle, 'artist': uartist or dcreator or None, 'uri': furi,
                         'media_type': classify_media_type(uclass or None, protocol_info),
+                        'duration_seconds': parse_didl_duration(dur_match.group(1) if dur_match else None),
                     }))
 
             self.cache[container_id] = items

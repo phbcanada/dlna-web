@@ -69,6 +69,13 @@ logger = logging.getLogger("playqueue")
 gena_logger = logging.getLogger("playqueue.gena")
 
 
+def _extinf_seconds(track):
+    """The #EXTINF length field: whole seconds, or -1 (M3U's "unknown")
+    when the media server didn't report a duration for this track."""
+    secs = track.get("duration_seconds")
+    return secs if isinstance(secs, int) and secs >= 0 else -1
+
+
 # This handles the inbound network traffic from the device
 class GENAEventHTTPHandler(BaseHTTPRequestHandler):
     def do_NOTIFY(self):
@@ -213,7 +220,8 @@ class Queue:
         with self.lock:
             return {
                 "queue": [
-                    {"title": t.get("title"), "uri": t.get("uri")}
+                    {"title": t.get("title"), "uri": t.get("uri"),
+                     "duration_seconds": t.get("duration_seconds")}
                     for t in self.queue
                 ],
                 "current_idx": self.current_idx,
@@ -536,7 +544,7 @@ class Queue:
                     rel_path = track.get('relative_path')
                     uri = track.get('uri')
                     if rel_path and uri:
-                        f.write(f"#EXTINF:-1,{track['title']}\n")
+                        f.write(f"#EXTINF:{_extinf_seconds(track)},{track['title']}\n")
                         f.write(f"#URI:{uri}\n")
                         f.write(f"{rel_path}\n")
 
@@ -559,6 +567,7 @@ class Queue:
             new_tracks = []
             current_title = "Unknown Track"
             current_uri = None
+            current_duration = None
 
             with open(filepath, "r", encoding="utf-8") as f:
                 for line in f:
@@ -570,6 +579,13 @@ class Queue:
                         parts = line.split(",", 1)
                         if len(parts) > 1:
                             current_title = parts[1]
+                        # -1 is M3U's "length unknown" -- which is what
+                        # every playlist saved before durations existed has.
+                        try:
+                            secs = int(parts[0][len("#EXTINF:"):].strip())
+                            current_duration = secs if secs >= 0 else None
+                        except ValueError:
+                            current_duration = None
                     elif line.startswith("#URI:"):
                         current_uri = line[5:].strip()
                     elif not line.startswith("#"):
@@ -578,10 +594,12 @@ class Queue:
                             new_tracks.append({
                                 'title': current_title,
                                 'uri': uri,
-                                'relative_path': line
+                                'relative_path': line,
+                                'duration_seconds': current_duration,
                             })
                         current_title = "Unknown Track"
                         current_uri = None
+                        current_duration = None
 
             if new_tracks:
                 with self.lock:
@@ -646,7 +664,7 @@ class Queue:
             with open(filepath, "a", encoding="utf-8") as f:
                 if not file_exists:
                     f.write("#EXTM3U\n")
-                f.write(f"#EXTINF:-1,{title}\n")
+                f.write(f"#EXTINF:{_extinf_seconds(track)},{title}\n")
                 f.write(f"#URI:{uri}\n")
                 f.write(f"{rel_path}\n")
 

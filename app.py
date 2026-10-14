@@ -220,6 +220,7 @@ def _browse_payload(items):
             entry["uri"] = data.get("uri")
             entry["artist"] = data.get("artist")
             entry["media_type"] = data.get("media_type", "other")
+            entry["duration_seconds"] = data.get("duration_seconds")
             file_count += 1
         elif item_type == "folder":
             # Direct-child count only (not recursive) -- an in-memory
@@ -304,6 +305,11 @@ def api_queue_add():
     if not title or not uri:
         return jsonify({"error": "title and uri are required"}), 400
     item = {"id": data.get("id"), "title": title, "artist": data.get("artist"), "uri": uri}
+    # Client-supplied (echoed back from the browse listing), so only
+    # accept a sane non-negative int -- anything else just means "unknown".
+    duration_seconds = data.get("duration_seconds")
+    if isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool) and duration_seconds >= 0:
+        item["duration_seconds"] = duration_seconds
     item["relative_path"] = state.browser._get_relative_path(title, uri)
     state.queue.add_to_queue(item)
     return jsonify(state.queue.snapshot())

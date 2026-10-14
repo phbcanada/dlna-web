@@ -384,8 +384,10 @@ function renderBrowseList(data) {
     } else {
       row.innerHTML =
         `<span class="row-icon">${iconForMediaType(item.media_type)}</span>` +
-        `<span class="row-title"></span>`;
+        `<span class="row-title"></span>` +
+        `<span class="row-duration"></span>`;
       row.querySelector(".row-title").textContent = item.title;
+      row.querySelector(".row-duration").textContent = formatDuration(item.duration_seconds);
       row.querySelector(".row-title").addEventListener("click", () => addToQueue(item));
     }
     list.appendChild(row);
@@ -659,7 +661,10 @@ async function refreshBrowse() {
 
 async function addToQueue(item) {
   try {
-    await apiPost("/api/queue/add", { id: item.id, title: item.title, artist: item.artist, uri: item.uri });
+    await apiPost("/api/queue/add", {
+      id: item.id, title: item.title, artist: item.artist, uri: item.uri,
+      duration_seconds: item.duration_seconds,
+    });
   } catch (e) {
     toast(`Could not queue "${item.title}": ${e.message}`, true);
   }
@@ -695,10 +700,12 @@ function renderQueue(snapshot) {
       `<span class="row-index"></span>` +
       `<span class="row-icon">${idx === snapshot.current_idx ? "\u25B6" : "\u{1F3B5}"}</span>` +
       `<span class="row-title"></span>` +
+      `<span class="row-duration"></span>` +
       `<button class="row-add" title="Add to active playlist"${activePlaylistName ? "" : " disabled"}>\u2795</button>` +
       `<button class="row-remove" title="Remove from queue">\u{1F5D1}\uFE0F</button>`;
     row.querySelector(".row-index").textContent = idx + 1;
     row.querySelector(".row-title").textContent = track.title;
+    row.querySelector(".row-duration").textContent = formatDuration(track.duration_seconds);
     row.querySelector(".row-title").addEventListener("click", () => playAt(idx));
     row.querySelector(".row-add").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -845,6 +852,18 @@ function toSeconds(hms) {
   const parts = hms.split(":").map((p) => parseInt(p, 10) || 0);
   if (parts.length !== 3) return 0;
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+// Compact M:SS (H:MM:SS past an hour) for list rows -- deliberately not
+// the renderer-style HH:MM:SS the transport readout uses, to keep the
+// column narrow. Blank, not "0:00", when the media server didn't report
+// a duration (or for tracks loaded from a pre-duration playlist).
+function formatDuration(seconds) {
+  if (typeof seconds !== "number" || seconds < 0) return "";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = String(seconds % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
 function formatNowPlaying(title, artist) {
