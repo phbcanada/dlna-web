@@ -75,6 +75,7 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get('Content-Length', 0))
         if content_length > 0:
             payload = self.rfile.read(content_length).decode('utf-8')
+            gena_logger.debug(f"NOTIFY SID={self.headers.get('SID')}: {payload}")
             if "LastChange" in payload:
                 self.process_transport_event(payload)
 
@@ -111,6 +112,23 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
                             continue
 
                     for state_node in inner_root.iter():
+                        # RenderingControl LastChange. Only the Master
+                        # channel drives the UI slider (it's the only one
+                        # we Get/SetVolume on); some renderers omit the
+                        # channel attribute entirely, so treat that as
+                        # Master too.
+                        if state_node.tag.endswith('Volume') and \
+                                state_node.attrib.get('channel', 'Master') == 'Master':
+                            session = self.server.play_queue
+                            try:
+                                vol = int(state_node.attrib.get('val', ''))
+                            except ValueError:
+                                continue
+                            gena_logger.debug(f"Device broadcast: Volume {vol}")
+                            if session.on_volume_change:
+                                session.on_volume_change(session, vol)
+                            continue
+
                         if 'TransportState' in state_node.tag:
                             state = state_node.attrib.get('val', '')
                             # NOTE: attribute name kept as "play_queue" for
@@ -671,6 +689,12 @@ class PlaybackSession:
         # GENA (falls back to polling) because the port is still taken.
         self.gena_server = None
 
+        # Called with an int 0-100 when a RenderingControl NOTIFY reports
+        # a volume change. Set by AppState; left None by the CLI facade.
+        # A callback rather than importing state here, so this module
+        # stays renderer/session-level and the CLI keeps working.
+        self.on_volume_change = None
+
     # ------------------------------------------------------------------
     # Playback -- reads queue state via Queue's data methods, then acts
     # on the renderer based on what comes back
@@ -891,6 +915,63 @@ class PlaybackSession:
         # A short delay guarantees the HTTP server thread above is fully
         # listening before we try to subscribe.
         threading.Timer(1.0, send_subscribe).start()
+        threading.Timer(1.0, lambda: self._subscribe_rendering_control(local_ip, local_port)).start()
+
+    def _subscribe_rendering_control(self, local_ip, local_port):
+        """Second GENA subscription, to RenderingControl, so volume changes
+        made on the device itself (GGMM knob, TV remote) reach the UI.
+        Deliberately separate from the AVTransport subscription above and
+        much less fussy: failure here only means remote volume changes go
+        unnoticed (the pre-existing behaviour), so there is no polling
+        fallback -- just a log line. Both subscriptions share the one
+        listener; no routing is needed because AVTransport's LastChange
+        never carries Volume and RenderingControl's never carries
+        TransportState (see process_transport_event())."""
+        if not self.running:
+            return
+        event_url = getattr(self.renderer, 'rendering_control_event_url', None)
+        if not event_url:
+            return
+
+        headers = {
+            "HOST": event_url.split("://")[1].split("/")[0],
+            "TIMEOUT": "Second-300"
+        }
+        current_sid = getattr(self, 'rc_gena_sid', None)
+        if current_sid:
+            headers["SID"] = current_sid
+        else:
+            headers["CALLBACK"] = f"<http://{local_ip}:{local_port}/>"
+            headers["NT"] = "upnp:event"
+            logger.info(f"Sending RenderingControl SUBSCRIBE to: {event_url}")
+
+        try:
+            res = requests.request("SUBSCRIBE", event_url, headers=headers, timeout=5)
+        except Exception as e:
+            logger.info(f"RenderingControl subscribe failed ({e}) -- remote volume changes won't be tracked.")
+            self.rc_gena_sid = None
+            return
+
+        if res.status_code != 200:
+            logger.info(f"RenderingControl subscribe rejected ({res.status_code}) -- "
+                        f"remote volume changes won't be tracked.")
+            self.rc_gena_sid = None
+            return
+
+        if not current_sid:
+            self.rc_gena_sid = res.headers.get('SID')
+            logger.info(f"RenderingControl subscription active. SID: {self.rc_gena_sid}")
+        else:
+            logger.debug("RenderingControl subscription lease renewed.")
+
+        # Checked again here because shutdown() may have run while the
+        # SUBSCRIBE request above was in flight; re-arming then would
+        # leave an orphan timer renewing a dead session's lease.
+        if self.running:
+            self.rc_renewal_timer = threading.Timer(
+                150.0, self._subscribe_rendering_control, args=(local_ip, local_port))
+            self.rc_renewal_timer.daemon = True
+            self.rc_renewal_timer.start()
 
     def _start_local_monitor_thread(self):
         """Background SOAP-polling fallback for renderers that reject GENA."""
@@ -934,6 +1015,8 @@ class PlaybackSession:
         logger.info("Tearing down PlaybackSession resources.")
         if hasattr(self, 'renewal_timer'):
             self.renewal_timer.cancel()
+        if hasattr(self, 'rc_renewal_timer'):
+            self.rc_renewal_timer.cancel()
 
         self.running = False
 

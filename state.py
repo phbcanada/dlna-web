@@ -172,6 +172,7 @@ class AppState:
                 self.session.shutdown()
             self.renderer = new_renderer
             self.session = PlaybackSession(self.renderer, self.queue)
+            self.session.on_volume_change = self._on_remote_volume_change
             self.session.start_monitoring()
             self.renderer_connected = True
             self.renderer_last_seen = time.time()
@@ -233,6 +234,26 @@ class AppState:
             self.volume = value
             events.publish("renderer_volume", self.volume_status_payload())
         return ok
+
+    def _on_remote_volume_change(self, session, value):
+        """GENA RenderingControl callback (runs on the GENA listener
+        thread). Picks up volume changed on the device itself.
+        Ignored when:
+          - the NOTIFY came from a session that's since been replaced
+            (late event racing a renderer switch);
+          - the renderer has no usable volume control -- the LG answers
+            GetVolume with 606 but may still send RenderingControl
+            events, and the UI has no slider for it;
+          - the value is unchanged, which also swallows the echo of our
+            own SetVolume so it doesn't cause a redundant SSE event."""
+        if session is not self.session or not self.volume_supported:
+            return
+        value = max(0, min(100, value))
+        if value == self.volume:
+            return
+        logger.info(f"Renderer volume changed on device: {self.volume} -> {value}")
+        self.volume = value
+        events.publish("renderer_volume", self.volume_status_payload())
 
     # ------------------------------------------------------------------
     # Active playlist -- which playlist file the queue rows' "+" button
