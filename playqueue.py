@@ -106,7 +106,7 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
 
                     sanitized_inner = inner_xml.replace("& ", "&amp; ")
                     try:
-                        inner_root = ET.fromstring(sanitized_inner)
+                        state_nodes = ET.fromstring(sanitized_inner).iter()
                     except ET.ParseError:
                         import re
                         state_match = re.search(r'TransportState\s+val="([^"]+)"', inner_xml)
@@ -114,11 +114,15 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
                             class DummyNode:
                                 tag = 'TransportState'
                                 attrib = {'val': state_match.group(1)}
-                            inner_root = [DummyNode()]
+                            # A plain list, not an Element -- so the loop
+                            # below iterates state_nodes directly rather
+                            # than calling .iter() (which a list lacks,
+                            # and which made this fallback always raise).
+                            state_nodes = [DummyNode()]
                         else:
                             continue
 
-                    for state_node in inner_root.iter():
+                    for state_node in state_nodes:
                         # RenderingControl LastChange. Only the Master
                         # channel drives the UI slider (it's the only one
                         # we Get/SetVolume on); some renderers omit the
