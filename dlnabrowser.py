@@ -110,9 +110,15 @@ def tech_summary(res_attrs):
     attribute is missing -- MiniDLNA leaves bitsPerSample off most lossy
     files, for example.
 
-    res@bitrate is bytes/second per the UPnP AV spec, hence the *8.
-    Unverified against MiniDLNA's actual output; the raw value is in the
-    DEBUG log's SetAVTransportURI DIDL if the kbps figure looks off."""
+    res@bitrate is bytes/second per the UPnP AV spec, but MiniDLNA sends
+    bits/second: a 128 kb/s MP3 (per ffprobe) came through as 1024 kbps
+    when this multiplied by 8. So it's used as-is.
+
+    Known limitation: for VBR MP3s MiniDLNA's figure can be far off (64
+    kbps for a 187 kb/s VBR file, apparently one frame's rate). Deriving
+    an average from size * 8 / duration was tried and dropped -- it
+    reported wrong figures for CBR files -- so this shows what MiniDLNA
+    reports."""
     if not res_attrs:
         return None
 
@@ -130,7 +136,7 @@ def tech_summary(res_attrs):
         parts.append(_FORMAT_LABELS.get(mime) or re.sub(r'^x-', '', mime.split("/")[-1]).upper())
     bitrate = as_int("bitrate")
     if bitrate:
-        parts.append(f"{round(bitrate * 8 / 1000)} kbps")
+        parts.append(f"{round(bitrate / 1000)} kbps")
     rate = as_int("sampleFrequency")
     if rate:
         parts.append(f"{rate / 1000:g} kHz")
