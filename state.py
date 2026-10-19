@@ -429,14 +429,16 @@ class AppState:
         title with a fully-filled progress bar even though nothing is
         playing.
 
-        Artist is the one field NOT trusted from the renderer -- not
-        every renderer echoes it back in TrackMetaData (gmediarender in
-        particular doesn't), so it's overlaid here from the play queue's
-        own browse-time library metadata for whatever track is current,
-        which is reliably populated since it comes straight from the
-        media server's DIDL-Lite listing. Album, album art and the
-        technical summary come from the same browse-time source, looked
-        up by URI (see DLNABrowser.track_meta_for_uri())."""
+        Title and artist are NOT trusted from the renderer whenever the
+        queue has a current track: they're overlaid from the queue's own
+        browse-time library metadata, which comes straight from the media
+        server's DIDL-Lite listing. gmediarender doesn't echo artist in
+        TrackMetaData, and the GGMM was seen returning no usable title
+        after a reachability blip (shown as "Unknown") while still
+        playing. The renderer's own title is only used when the queue has
+        no current track. Album, album art and the technical summary come
+        from the same browse-time source, looked up by URI (see
+        DLNABrowser.track_meta_for_uri())."""
         renderer = self.renderer
         if not renderer or not renderer.control_url:
             return {"transport_state": "NO_MEDIA_PRESENT", **IDLE_POSITION}
@@ -445,6 +447,8 @@ class AppState:
         if transport_state in ACTIVE_TRANSPORT_STATES:
             pos = dict(renderer.get_position_info())
             current = self.queue.current_track()
+            if current and current.get("title"):
+                pos["title"] = current["title"]
             if current and current.get("artist"):
                 pos["artist"] = current["artist"]
             meta = self.browser.track_meta_for_uri(current["uri"]) if current else {}
@@ -475,7 +479,10 @@ class AppState:
                     if reachable:
                         logger.info(f"Renderer '{renderer.friendly_name}' is reachable again.")
                     else:
-                        logger.warning(f"Renderer '{renderer.friendly_name}' stopped responding (offline or asleep).")
+                        logger.warning(
+                            f"Renderer '{renderer.friendly_name}' stopped responding (offline or asleep): "
+                            f"{renderer.last_transport_error}"
+                        )
                     events.publish("renderer_status", {
                         "connected": reachable,
                         "friendly_name": renderer.friendly_name,

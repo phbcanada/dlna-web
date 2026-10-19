@@ -46,6 +46,13 @@ class EventBus:
             if q in self._subscribers:
                 self._subscribers.remove(q)
 
+    def subscriber_count(self):
+        """Open subscribers -- in practice open /api/stream connections,
+        the only subscriber. Logged to watch for waitress thread
+        starvation (each open stream holds a thread)."""
+        with self._lock:
+            return len(self._subscribers)
+
     def publish(self, event_type, data=None):
         """Fans an event out to every connected subscriber. Never blocks the
         caller: if a subscriber's queue is full (a slow/stuck browser tab),

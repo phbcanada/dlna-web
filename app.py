@@ -569,6 +569,13 @@ def api_stream():
     """Server-Sent Events stream: log lines, queue changes, renderer/server
     connectivity transitions, and once-a-second playback ticks."""
     q = events.subscribe()
+    # Each open stream holds a waitress thread for its lifetime, and a
+    # dead one (refreshed tab, sleeping phone) holds it until a write
+    # fails. Logging the count on open/close shows whether streams pile
+    # up past the thread pool (waitress default: 4) -- see the
+    # "Task queue depth" warnings.
+    client = request.remote_addr
+    logger.info(f"SSE stream opened by {client} -- {events.subscriber_count()} open.")
 
     def gen():
         try:
@@ -581,6 +588,7 @@ def api_stream():
                     yield ": keepalive\n\n"
         finally:
             events.unsubscribe(q)
+            logger.info(f"SSE stream closed for {client} -- {events.subscriber_count()} open.")
 
     return Response(gen(), mimetype="text/event-stream")
 

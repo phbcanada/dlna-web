@@ -84,7 +84,20 @@ class GENAEventHTTPHandler(BaseHTTPRequestHandler):
             payload = self.rfile.read(content_length).decode('utf-8')
             gena_logger.debug(f"NOTIFY SID={self.headers.get('SID')}: {payload}")
             if "LastChange" in payload:
+                # The 200 below isn't sent until this returns, and handling
+                # a STOPPED can run the probe and start the next track
+                # (several SOAP round trips to the same renderer that's
+                # waiting on this reply). Single-threaded server, so any
+                # further NOTIFY queues behind it too. Logged when slow, to
+                # decide whether to acknowledge first and process after.
+                started = time.monotonic()
                 self.process_transport_event(payload)
+                elapsed = time.monotonic() - started
+                if elapsed > 1.0:
+                    gena_logger.warning(
+                        f"NOTIFY handling took {elapsed:.1f}s before we acknowledged it "
+                        f"(SID={self.headers.get('SID')})."
+                    )
 
         # Always return HTTP 200 OK to acknowledge the event receipt
         self.send_response(200)
@@ -820,6 +833,18 @@ class PlaybackSession:
             logger.info(
                 f"Stopped-notification probe found the renderer actually "
                 f"{confirmed_state} -- treating the notification as stale, not advancing."
+            )
+            self.was_playing = True
+            return
+        if confirmed_state == "UNKNOWN":
+            # The probe itself failed (timeout / unreachable), so we can't
+            # tell a real track end from the GGMM's spurious post-load
+            # STOPPED. Advancing here would skip a track; same rule as the
+            # polling loop, which never acts on UNKNOWN. was_playing goes
+            # back to True so the next real STOPPED is probed again.
+            logger.warning(
+                f"Stopped-notification probe got no answer from the renderer "
+                f"(UNKNOWN: {self.renderer.last_transport_error}) -- not advancing."
             )
             self.was_playing = True
             return

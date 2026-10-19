@@ -26,6 +26,7 @@
 #   * No behavioral change to the interactive select_renderer() CLI flow.
 # --------------------------------------------------------------------------
 import socket
+import time
 import requests
 import xml.etree.ElementTree as ET
 from urllib.parse import urljoin, urlparse
@@ -67,6 +68,11 @@ class DLNARenderer:
         # so get_position_info() logs only when that value changes.
         self._sent_res_duration = None
         self._last_reported_duration = None
+        # Why the last get_transport_state() returned UNKNOWN, and how long
+        # the call took -- included in the ticker's "stopped responding"
+        # warning to tell a slow renderer (ReadTimeout after ~6s) from one
+        # that briefly wasn't listening (ConnectionError, fast).
+        self.last_transport_error = None
 
     @property
     def host(self):
@@ -380,6 +386,7 @@ class DLNARenderer:
             "SOAPACTION": f'"{self.NS_AVT}#GetTransportInfo"',
             "Connection": "close"
         }
+        started = time.monotonic()
         try:
             # Bumped from 2s -- this is also what the new stopped-
             # notification probe calls (see PlaybackSession.
@@ -391,8 +398,11 @@ class DLNARenderer:
             state_node = root.find(".//CurrentTransportState")
             if state_node is not None:
                 return state_node.text
+            reason = "no CurrentTransportState in response"
         except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
             logger.debug(f"get_transport_state failed (renderer likely offline): {e}")
+        self.last_transport_error = f"{reason} (after {time.monotonic() - started:.1f}s)"
         return "UNKNOWN"
 
     def get_position_info(self):
