@@ -94,15 +94,15 @@ input {
 /* ---------------------------------------------------------
    Top bar
    --------------------------------------------------------- */
+/* Just the title, drawn straight on the casing background -- no bar,
+   border or bottom padding, to give the vertical space to the panels. */
 .topbar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 20px;
-  background: linear-gradient(180deg, #1a1d21, #16181b);
-  border-bottom: 1px solid var(--border);
+  padding: 10px 20px 0;
   flex-wrap: wrap;
 }
 
@@ -124,17 +124,6 @@ input {
   font-size: 14px;
   letter-spacing: 0.12em;
   color: var(--text);
-}
-
-/* Takes all the space after the brand and centers the chips within it.
-   When the topbar wraps (phone width) the chips get their own line and
-   are centered on that. */
-.device-chips {
-  flex: 1 1 auto;
-  display: flex;
-  justify-content: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .chip {
@@ -170,6 +159,7 @@ input {
   color: var(--text-dim);
   letter-spacing: 0.08em;
   font-size: 10.5px;
+  white-space: nowrap;
 }
 
 .chip-value {
@@ -377,6 +367,19 @@ input {
   font-weight: 600;
 }
 
+/* Panel label with its device chip right beside it (MEDIA SERVER on
+   Browse, OUTPUT on Play Queue). */
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* On a narrow panel the chip's value truncates rather than the chip
+   wrapping its label. */
+.panel-title .chip { min-width: 0; }
+
 .panel-header-actions { display: flex; gap: 6px; align-items: center; }
 
 .browse-search {
@@ -550,7 +553,7 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
   justify-content: center;
   align-items: center;
   gap: 18px;
-  margin: 18px 20px 0;
+  margin: 8px 20px 0;
   padding: 14px;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -584,6 +587,7 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
    bottom, so the bar's bottom edge lines up with the art and with the
    transport buttons (.transport is align-self: end). */
 .np-info {
+  position: relative;
   min-width: 0;
   align-self: stretch;
   display: flex;
@@ -664,6 +668,9 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
   }
   .np-art { width: 72px; height: 72px; }
   .np-art-placeholder { font-size: 28px; }
+  /* The info column is too short here for a stack: two wrapped toasts
+     ran up past the top of the strip. Newest only. */
+  .toast:not(:last-child) { display: none; }
   .transport {
     grid-column: 1 / -1;
     justify-self: center;
@@ -986,29 +993,41 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
 /* ---------------------------------------------------------
    Toasts
    --------------------------------------------------------- */
+/* Toasts sit in the now-playing strip, right-aligned just above the
+   progress bar where the eye already is, rather than in a screen corner
+   where they were easy to miss. Absolutely positioned so they overlay
+   the tag lines briefly instead of reflowing the strip. Bottom-anchored,
+   so a second toast stacks upward. .np-info is their containing block. */
 .toast-stack {
-  position: fixed;
-  bottom: 16px;
-  right: 16px;
+  position: absolute;
+  right: 0;
+  bottom: 30px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  z-index: 200;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 100%;
+  z-index: 20;
+  pointer-events: none;
 }
 
 .toast {
-  background: var(--panel-raised);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--led-green);
-  color: var(--text);
-  padding: 10px 14px;
+  background: #1e3a27;
+  border: 1px solid var(--led-green);
+  color: #e6ffec;
+  padding: 7px 12px;
   border-radius: 4px;
-  font-size: 12.5px;
-  box-shadow: 0 8px 20px rgba(0,0,0,0.4);
-  max-width: 300px;
+  font-size: 13.5px;
+  font-weight: 500;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+  max-width: 460px;
   animation: toast-in 150ms ease;
 }
-.toast.error { border-left-color: var(--led-red); }
+.toast.error {
+  background: #3d1f1e;
+  border-color: var(--led-red);
+  color: #ffe1df;
+}
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(6px); }

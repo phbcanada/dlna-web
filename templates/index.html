@@ -42,25 +42,12 @@
 <div class="rack">
 
   <!-- ============================================================ -->
-  <!-- Top bar: brand + device selectors                            -->
+  <!-- Top bar: brand (device chips live in the panel headers)      -->
   <!-- ============================================================ -->
   <header class="topbar" id="topbar">
     <div class="brand">
       <span class="brand-mark">🔊</span>
       <span class="brand-name">{{ hostname }}: MEDIA PLAYER</span>
-    </div>
-
-    <div class="device-chips">
-      <div class="chip chip-static" id="server-chip" data-kind="server" title="Configured at deploy time">
-        <span class="led" id="server-led"></span>
-        <span class="chip-label">MEDIA SERVER</span>
-        <span class="chip-value" id="server-value">Not connected</span>
-      </div>
-      <div class="chip" id="renderer-chip" data-kind="renderer">
-        <span class="led" id="renderer-led"></span>
-        <span class="chip-label">OUTPUT</span>
-        <span class="chip-value" id="renderer-value">Not connected</span>
-      </div>
     </div>
   </header>
 
@@ -97,6 +84,8 @@
         <div class="np-tech" id="np-tech"></div>
         <span class="transport-state" id="transport-state">STOPPED</span>
       </div>
+      <!-- Toasts: right-aligned just above the progress bar, stacking upward -->
+      <div class="toast-stack" id="toast-stack"></div>
       <div class="progress-row">
         <span class="time-code" id="position-code">00:00:00</span>
         <div class="led-bar" id="led-bar"></div>
@@ -128,7 +117,14 @@
     <!-- Browse panel -->
     <section class="panel" id="browse-panel">
       <div class="panel-header">
-        <h2>Browse</h2>
+        <div class="panel-title">
+          <h2>Browse</h2>
+          <div class="chip chip-static" id="server-chip" data-kind="server" title="Configured at deploy time">
+            <span class="led" id="server-led"></span>
+            <span class="chip-label">MEDIA SERVER</span>
+            <span class="chip-value" id="server-value">Not connected</span>
+          </div>
+        </div>
         <div class="panel-header-actions">
           <input type="text" id="browse-search" class="browse-search" placeholder="Search…" autocomplete="off">
           <button class="btn-sm" id="add-folder-btn" disabled>Queue All</button>
@@ -143,7 +139,14 @@
     <!-- Queue panel -->
     <section class="panel" id="queue-panel">
       <div class="panel-header">
-        <h2>Play Queue</h2>
+        <div class="panel-title">
+          <h2>Play Queue</h2>
+          <div class="chip" id="renderer-chip" data-kind="renderer">
+            <span class="led" id="renderer-led"></span>
+            <span class="chip-label">OUTPUT</span>
+            <span class="chip-value" id="renderer-value">Not connected</span>
+          </div>
+        </div>
         <div class="panel-header-actions">
           <button class="btn-sm" id="playlist-save-btn">Save</button>
           <button class="btn-sm" id="playlist-load-btn">Load</button>
@@ -194,7 +197,6 @@
   </div>
 </div>
 
-<div class="toast-stack" id="toast-stack"></div>
 
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
