@@ -117,15 +117,17 @@ const CONSOLE_DEFAULT_HEIGHT = 240;
 let lastConsoleHeight = CONSOLE_DEFAULT_HEIGHT;
 
 // The console's max height is however much room is left after the topbar,
-// the splitter, and the browse/queue panels' own minimum height (set in
-// CSS on .main-grid) -- read from the actual layout rather than a flat
+// the now-playing strip, the splitter, and the browse/queue panels' own
+// minimum height (set in CSS on .main-grid) -- read from the actual
+// layout rather than a flat
 // percentage of the viewport, so dragging it as tall as it'll go can never
 // itself push the page past the viewport (which was the original bug).
 function getConsoleMaxHeight() {
   const topbarH = el("topbar").getBoundingClientRect().height;
+  const nowPlayingH = el("now-playing").getBoundingClientRect().height;
   const splitterH = el("console-splitter").getBoundingClientRect().height;
   const mainGridFloor = parseFloat(getComputedStyle(el("main-grid")).minHeight) || 200;
-  return Math.max(CONSOLE_MIN_HEIGHT, window.innerHeight - topbarH - splitterH - mainGridFloor);
+  return Math.max(CONSOLE_MIN_HEIGHT, window.innerHeight - topbarH - nowPlayingH - splitterH - mainGridFloor);
 }
 
 function setConsoleHeight(px) {
@@ -186,8 +188,22 @@ function setConsoleHeight(px) {
 function openPicker() {
   el("picker-title").textContent = "Renderers";
   el("device-picker").classList.remove("hidden");
+  positionPicker();
   el("picker-manual-url").value = "";
   rescanPicker();
+}
+
+// The device chips are centered in the topbar, so the dropdown is placed
+// under the OUTPUT chip at open time rather than pinned to a fixed corner,
+// then nudged left if that would run it off the right edge.
+function positionPicker() {
+  const picker = el("device-picker");
+  const chip = el("renderer-chip").getBoundingClientRect();
+  const margin = 20;
+  // clientWidth, not innerWidth: the latter includes the scrollbar.
+  const maxLeft = document.documentElement.clientWidth - picker.offsetWidth - margin;
+  picker.style.left = `${Math.max(margin, Math.min(chip.left, maxLeft)) + window.scrollX}px`;
+  picker.style.top = `${chip.bottom + 8 + window.scrollY}px`;
 }
 
 function closePicker() {
@@ -866,22 +882,47 @@ function formatDuration(seconds) {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
-function formatNowPlaying(title, artist) {
-  // No track loaded / stopped -- same "Nothing playing" placeholder as
-  // before artist support existed.
-  if (!title || title === "None") return "Nothing playing";
-  // Not every server/renderer populates artist metadata (upnp:artist /
-  // dc:creator) -- fall back to just the title when it's missing rather
-  // than showing a dangling "- Title".
-  return artist ? `${artist} - ${title}` : title;
+// Only touches the <img> when the URL actually changes -- the tick
+// arrives every second, and re-assigning src each time would refetch.
+// Falls back to the placeholder when there's no art or it fails to load.
+let currentArtUri = null;
+
+function setAlbumArt(uri) {
+  if (uri === currentArtUri) return;
+  currentArtUri = uri;
+  const img = el("np-art-img");
+  if (uri) {
+    img.src = uri;
+  } else {
+    img.removeAttribute("src");
+    img.hidden = true;
+    el("np-art-placeholder").hidden = false;
+  }
 }
+
+el("np-art-img").addEventListener("load", () => {
+  el("np-art-img").hidden = false;
+  el("np-art-placeholder").hidden = true;
+});
+el("np-art-img").addEventListener("error", () => {
+  el("np-art-img").hidden = true;
+  el("np-art-placeholder").hidden = false;
+});
 
 function applyTick(tick) {
   if (!ledBarBuilt) buildLedBar();
 
-  el("now-playing-title").textContent = tick.connected
-    ? formatNowPlaying(tick.title, tick.artist)
-    : "Renderer offline";
+  // No track loaded / stopped -> "Nothing playing". Artist, album and
+  // the tech line each blank out (and collapse via :empty in CSS) when
+  // the file's tags or the media server don't supply them.
+  const hasTrack = tick.connected && tick.title && tick.title !== "None";
+  el("now-playing-title").textContent = !tick.connected
+    ? "Renderer offline"
+    : (hasTrack ? tick.title : "Nothing playing");
+  el("np-artist").textContent = hasTrack ? (tick.artist || "") : "";
+  el("np-album").textContent = hasTrack ? (tick.album || "") : "";
+  el("np-tech").textContent = hasTrack ? (tick.tech || "") : "";
+  setAlbumArt(hasTrack ? (tick.album_art_uri || null) : null);
 
   el("position-code").textContent = tick.position || "00:00:00";
   el("duration-code").textContent = tick.duration || "00:00:00";

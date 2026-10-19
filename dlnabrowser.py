@@ -89,6 +89,60 @@ def parse_didl_duration(value):
     return h * 3600 + mins * 60 + secs
 
 
+# MIME type (from protocolInfo) -> short format label for the now-playing
+# readout. Anything unlisted falls back to its subtype, uppercased.
+_FORMAT_LABELS = {
+    "audio/mpeg": "MP3",
+    "audio/flac": "FLAC", "audio/x-flac": "FLAC",
+    "audio/mp4": "AAC", "audio/x-m4a": "AAC", "audio/aac": "AAC",
+    "audio/x-ms-wma": "WMA",
+    "audio/ogg": "OGG", "audio/x-ogg": "OGG", "application/ogg": "OGG",
+    "audio/wav": "WAV", "audio/x-wav": "WAV", "audio/wave": "WAV",
+    "audio/L16": "PCM",
+    "audio/aiff": "AIFF", "audio/x-aiff": "AIFF",
+}
+
+
+def tech_summary(res_attrs):
+    """One-line technical readout ("MP3 · 320 kbps · 44.1 kHz · Stereo")
+    built from the media server's own <res> attributes, or None if none
+    of them are present. Each part is dropped individually when its
+    attribute is missing -- MiniDLNA leaves bitsPerSample off most lossy
+    files, for example.
+
+    res@bitrate is bytes/second per the UPnP AV spec, hence the *8.
+    Unverified against MiniDLNA's actual output; the raw value is in the
+    DEBUG log's SetAVTransportURI DIDL if the kbps figure looks off."""
+    if not res_attrs:
+        return None
+
+    def as_int(key):
+        try:
+            v = int(res_attrs.get(key, ""))
+        except ValueError:
+            return None
+        return v if v > 0 else None
+
+    parts = []
+    pi = (res_attrs.get("protocolInfo") or "").split(":")
+    if len(pi) >= 3 and pi[2]:
+        mime = pi[2].split(";")[0]
+        parts.append(_FORMAT_LABELS.get(mime) or re.sub(r'^x-', '', mime.split("/")[-1]).upper())
+    bitrate = as_int("bitrate")
+    if bitrate:
+        parts.append(f"{round(bitrate * 8 / 1000)} kbps")
+    rate = as_int("sampleFrequency")
+    if rate:
+        parts.append(f"{rate / 1000:g} kHz")
+    bits = as_int("bitsPerSample")
+    if bits:
+        parts.append(f"{bits}-bit")
+    channels = as_int("nrAudioChannels")
+    if channels:
+        parts.append({1: "Mono", 2: "Stereo"}.get(channels, f"{channels} ch"))
+    return " · ".join(parts) or None
+
+
 class DLNABrowser:
     """Handles parsing the media tree from UPnP/DLNA media servers."""
     DEFAULT_DESC_URL = "http://192.168.132.5:8200/rootDesc.xml"
@@ -108,6 +162,9 @@ class DLNABrowser:
         # (protocolInfo, duration, size, bitrate, ...), forwarded to the
         # renderer at play time -- see res_attrs_for_uri().
         self.res_attrs_by_uri = {}
+        # uri -> display-only tag metadata (album, album art URL) for the
+        # now-playing readout -- see track_meta_for_uri().
+        self.track_meta_by_uri = {}
 
     @staticmethod
     def get_friendly_name(desc_url):
@@ -194,6 +251,7 @@ class DLNABrowser:
         self.current_title = "Root"
         self.cache = {}
         self.res_attrs_by_uri = {}
+        self.track_meta_by_uri = {}
         return self._fetch_control_url()
 
     def select_server(self):
@@ -334,6 +392,15 @@ class DLNABrowser:
                         if artist_node is None:
                             artist_node = el.find('{http://purl.org/dc/elements/1.1/}creator')
                         artist = artist_node.text if artist_node is not None else None
+                        if uri:
+                            # A server may list several albumArtURI
+                            # (different sizes/profiles); the first will do.
+                            album_node = el.find(f'{{{self.NS_DIDL_UPNP}}}album')
+                            art_node = el.find(f'{{{self.NS_DIDL_UPNP}}}albumArtURI')
+                            self.track_meta_by_uri[uri] = {
+                                'album': album_node.text if album_node is not None else None,
+                                'album_art_uri': ((art_node.text or '').strip() or None) if art_node is not None else None,
+                            }
                         items.append(('file', {
                             'id': el.attrib.get('id'),
                             'title': el.find('{http://purl.org/dc/elements/1.1/}title').text,
@@ -367,6 +434,20 @@ class DLNABrowser:
                         'media_type': classify_media_type(uclass or None, protocol_info),
                         'duration_seconds': parse_didl_duration(dur_match.group(1) if dur_match else None),
                     }))
+                # Display-only album/art, scanned per item block rather
+                # than added to the ordered regex above, where one more
+                # optional group in the wrong order would silently
+                # swallow fields that match today.
+                for block in re.findall(r'<item\s.*?</item>', result_xml, re.DOTALL):
+                    res_m = re.search(r'<res[^>]*>([^<]+)</res>', block)
+                    if not res_m:
+                        continue
+                    album_m = re.search(r'<upnp:album>([^<]*)</upnp:album>', block)
+                    art_m = re.search(r'<upnp:albumArtURI[^>]*>([^<]*)</upnp:albumArtURI>', block)
+                    self.track_meta_by_uri[res_m.group(1)] = {
+                        'album': html.unescape(album_m.group(1)) if album_m else None,
+                        'album_art_uri': (html.unescape(art_m.group(1)).strip() or None) if art_m else None,
+                    }
 
             self.cache[container_id] = items
             return items
@@ -381,6 +462,18 @@ class DLNABrowser:
         carried on queue entries so tracks loaded from an M3U playlist
         (which only stores title/URI/path) get them too."""
         return self.res_attrs_by_uri.get(uri)
+
+    def track_meta_for_uri(self, uri):
+        """Display metadata for the now-playing readout: album, album art
+        URL, and a technical summary built from the <res> attributes.
+        Looked up by URI for the same reason as res_attrs_for_uri(). Any
+        field may be None (untagged file, no art, not in the library)."""
+        meta = self.track_meta_by_uri.get(uri) or {}
+        return {
+            'album': meta.get('album'),
+            'album_art_uri': meta.get('album_art_uri'),
+            'tech': tech_summary(self.res_attrs_by_uri.get(uri)),
+        }
 
     def count_tracks(self, container_id):
         """Direct-child track count for a folder -- deliberately NOT

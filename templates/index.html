@@ -81,7 +81,47 @@
   </div>
 
   <!-- ============================================================ -->
-  <!-- Main grid: browse / queue+transport                          -->
+  <!-- Now playing strip: art, tags, progress, transport            -->
+  <!-- ============================================================ -->
+  <section class="now-playing" id="now-playing">
+    <div class="np-art" id="np-art">
+      <img id="np-art-img" alt="" hidden>
+      <span class="np-art-placeholder" id="np-art-placeholder">♪</span>
+    </div>
+
+    <div class="np-info">
+      <div class="now-playing-title" id="now-playing-title">Nothing playing</div>
+      <div class="np-artist" id="np-artist"></div>
+      <div class="np-album" id="np-album"></div>
+      <div class="np-status-row">
+        <div class="np-tech" id="np-tech"></div>
+        <span class="transport-state" id="transport-state">STOPPED</span>
+      </div>
+      <div class="progress-row">
+        <span class="time-code" id="position-code">00:00:00</span>
+        <div class="led-bar" id="led-bar"></div>
+        <span class="time-code" id="duration-code">00:00:00</span>
+      </div>
+    </div>
+
+    <div class="transport">
+      <div class="volume-control" id="volume-control">
+        <span class="volume-icon">🔊</span>
+        <input type="range" id="volume-slider" class="volume-slider" title="Volume" min="0" max="100" value="0" disabled>
+        <span class="volume-value" id="volume-value">--</span>
+      </div>
+      <div class="transport-buttons">
+        <button class="btn-transport" id="prev-btn" title="Previous">⏮</button>
+        <button class="btn-transport btn-transport-main" id="playpause-btn" title="Play / Pause">▶</button>
+        <button class="btn-transport" id="stop-btn" title="Stop">⏹</button>
+        <button class="btn-transport" id="next-btn" title="Next">⏭</button>
+        <button class="btn-transport" id="shuffle-btn" title="Shuffle">🔀</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- Main grid: browse / queue                                    -->
   <!-- ============================================================ -->
   <main class="main-grid" id="main-grid">
 
@@ -100,7 +140,7 @@
       </div>
     </section>
 
-    <!-- Queue + transport panel -->
+    <!-- Queue panel -->
     <section class="panel" id="queue-panel">
       <div class="panel-header">
         <h2>Play Queue</h2>
@@ -113,29 +153,6 @@
             <span class="chip-value" id="active-playlist-value">Not set</span>
           </div>
         </div>
-      </div>
-
-      <div class="now-playing">
-        <div class="now-playing-title" id="now-playing-title">Nothing playing</div>
-        <div class="progress-row">
-          <span class="time-code" id="position-code">00:00:00</span>
-          <div class="led-bar" id="led-bar"></div>
-          <span class="time-code" id="duration-code">00:00:00</span>
-        </div>
-      </div>
-
-      <div class="transport">
-        <button class="btn-transport" id="prev-btn" title="Previous">⏮</button>
-        <button class="btn-transport btn-transport-main" id="playpause-btn" title="Play / Pause">▶</button>
-        <button class="btn-transport" id="stop-btn" title="Stop">⏹</button>
-        <button class="btn-transport" id="next-btn" title="Next">⏭</button>
-        <button class="btn-transport" id="shuffle-btn" title="Shuffle">🔀</button>
-        <div class="volume-control" id="volume-control" title="Volume">
-          <span class="volume-icon">🔊</span>
-          <input type="range" id="volume-slider" class="volume-slider" min="0" max="100" value="0" disabled>
-          <span class="volume-value" id="volume-value">--</span>
-        </div>
-        <span class="transport-state" id="transport-state">STOPPED</span>
       </div>
 
       <div class="list" id="queue-list">

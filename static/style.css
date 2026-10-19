@@ -126,8 +126,13 @@ input {
   color: var(--text);
 }
 
+/* Takes all the space after the brand and centers the chips within it.
+   When the topbar wraps (phone width) the chips get their own line and
+   are centered on that. */
 .device-chips {
+  flex: 1 1 auto;
   display: flex;
+  justify-content: center;
   gap: 10px;
   flex-wrap: wrap;
 }
@@ -212,11 +217,11 @@ input {
 /* ---------------------------------------------------------
    Device picker dropdown
    --------------------------------------------------------- */
+/* left/top are set by positionPicker() in app.js, under the OUTPUT chip. */
 .device-picker {
   position: absolute;
-  top: 62px;
-  right: 20px;
   width: 340px;
+  max-width: calc(100vw - 40px);
   background: var(--panel-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -531,24 +536,138 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
 /* ---------------------------------------------------------
    Now playing / transport
    --------------------------------------------------------- */
+/* Full-width strip above the browse/queue grid: art | tags + progress |
+   transport. Fixed height (flex: 0 0 auto) -- the browse/queue grid
+   below absorbs any viewport change, and getConsoleMaxHeight() in
+   app.js subtracts this strip's height. The info column is capped and
+   the three columns centered as a group, so on a wide monitor the
+   progress bar doesn't stretch and the transport doesn't drift off to
+   the far edge, away from the track it controls. */
 .now-playing {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 112px minmax(0, 720px) auto;
+  justify-content: center;
+  align-items: center;
+  gap: 18px;
+  margin: 18px 20px 0;
   padding: 14px;
-  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
-.now-playing-title {
-  font-size: 14.5px;
-  margin-bottom: 10px;
-  color: var(--text);
+.np-art {
+  width: 112px;
+  height: 112px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-alt);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.np-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.np-art-placeholder {
+  font-size: 40px;
+  color: var(--text-dim);
+}
+
+/* Stretched to the row height with the progress bar pushed to the
+   bottom, so the bar's bottom edge lines up with the art and with the
+   transport buttons (.transport is align-self: end). */
+.np-info {
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+
+.now-playing-title,
+.np-artist,
+.np-album {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.now-playing-title {
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.np-artist {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+.np-album {
+  font-size: 13px;
+  font-style: italic;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+/* Tech readout with the transport state beside it. */
+.np-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 8px;
+}
+
+/* Same readout styling as the time codes and LED bar housing. */
+.np-tech {
+  min-width: 0;
+  padding: 2px 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: #0e1012;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Untagged files: drop the line rather than leave a gap. */
+.np-artist:empty,
+.np-album:empty,
+.np-tech:empty { display: none; }
+
 .progress-row {
   display: flex;
   align-items: center;
   gap: 10px;
+  margin-top: auto;
+  padding-top: 10px;
+}
+
+/* Same breakpoint as the single-column .main-grid. Declared here rather
+   than in that block so it comes after the base .now-playing rules. */
+@media (max-width: 860px) {
+  /* Smaller art beside the text; transport drops to its own row. */
+  .now-playing {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 12px 14px;
+  }
+  .np-art { width: 72px; height: 72px; }
+  .np-art-placeholder { font-size: 28px; }
+  .transport {
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
 }
 
 .time-code {
@@ -584,12 +703,26 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
   box-shadow: 0 0 4px rgba(95, 217, 122, 0.6);
 }
 
+/* Three-column grid so the volume slider (row 1) shares the button
+   row's column and is exactly as wide as it, with the speaker icon and
+   numeric value hanging in the side columns. .volume-control uses
+   display: contents to put its children straight into this grid.
+   Bottom-aligned in the strip so the buttons sit level with the
+   progress bar. */
 .transport {
-  display: flex;
+  align-self: end;
+  display: grid;
+  grid-template-columns: auto auto auto;
   align-items: center;
+  column-gap: 8px;
+  row-gap: 12px;
+}
+
+.transport-buttons {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
   gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
 }
 
 .btn-transport {
@@ -622,12 +755,12 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
    when nothing is connected yet, rather than disappearing outright, so
    the transport row doesn't visibly reflow switching renderers. */
 .volume-control {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: contents;
 }
 
 .volume-icon {
+  grid-column: 1;
+  grid-row: 1;
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -635,7 +768,10 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
 .volume-slider {
   -webkit-appearance: none;
   appearance: none;
-  width: 100px;
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  margin: 0;
   height: 11px;
   border-radius: 5px;
   background: var(--led-off);
@@ -669,6 +805,8 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
 .volume-slider:disabled::-moz-range-thumb { background: var(--led-off); cursor: not-allowed; }
 
 .volume-value {
+  grid-column: 3;
+  grid-row: 1;
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--text-muted);
@@ -678,14 +816,14 @@ body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color
 }
 
 .transport-state {
-  margin-left: auto;
+  flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.08em;
   color: var(--text-dim);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 4px 8px;
+  padding: 2px 7px;
 }
 
 /* ---------------------------------------------------------
