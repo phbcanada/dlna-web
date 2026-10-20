@@ -71,6 +71,15 @@ RETRY_INTERVAL_SECONDS = 10.0
 # come back.
 RENDERER_LOST_TIMEOUT_SECONDS = 20.0
 
+# Consecutive failed GetTransportInfo polls before the UI is told the
+# renderer is offline. The GGMM has been seen stalling for over 6s (a
+# ReadTimeout) and answering again a second later while playback carried
+# on -- four times in two minutes one night -- and each single miss used
+# to flip the UI to "Renderer offline" with a toast and a "Nothing
+# playing" flash. Two misses means 12s+ unresponsive with the 6s
+# timeout. The lost timer above still counts from the first miss.
+OFFLINE_AFTER_MISSES = 2
+
 # The media server is a fixed, deploy-time value now (not chosen at
 # runtime) -- set this once in the environment the service runs under.
 MEDIA_SERVER_ENV_VAR = "MEDIA_SERVER_DESC_URL"
@@ -132,6 +141,9 @@ class AppState:
         # *continuous* stretch of unreachability counts toward giving up
         # on it; see RENDERER_LOST_TIMEOUT_SECONDS.
         self._unreachable_since = None
+        # Consecutive failed polls of the selected renderer; see
+        # OFFLINE_AFTER_MISSES.
+        self._consecutive_misses = 0
 
     # ------------------------------------------------------------------
     # Renderer
@@ -178,6 +190,7 @@ class AppState:
             self.session.start_monitoring()
             self.renderer_connected = True
             self.renderer_last_seen = time.time()
+            self._consecutive_misses = 0
 
         # Per the agreed design: a (re)selected renderer always starts
         # from a clean slate, same as reaching the end of the queue --
@@ -474,17 +487,38 @@ class AppState:
                 transport_state = display["transport_state"]
                 reachable = transport_state != "UNKNOWN"
 
-                if reachable != self.renderer_connected:
-                    self.renderer_connected = reachable
-                    if reachable:
+                # A single miss is held: the UI keeps showing connected
+                # and its last tick until OFFLINE_AFTER_MISSES in a row.
+                if reachable:
+                    if self._consecutive_misses and self.renderer_connected:
+                        logger.info(
+                            f"Renderer '{renderer.friendly_name}' answered again after "
+                            f"{self._consecutive_misses} missed poll(s) -- display was held."
+                        )
+                    self._consecutive_misses = 0
+                else:
+                    self._consecutive_misses += 1
+                    if self.renderer_connected and self._consecutive_misses < OFFLINE_AFTER_MISSES:
+                        logger.warning(
+                            f"Renderer '{renderer.friendly_name}' not responding "
+                            f"(miss {self._consecutive_misses} of {OFFLINE_AFTER_MISSES}, holding display): "
+                            f"{renderer.last_transport_error}"
+                        )
+                holding = not reachable and self.renderer_connected and \
+                    self._consecutive_misses < OFFLINE_AFTER_MISSES
+                shown_reachable = reachable or holding
+
+                if shown_reachable != self.renderer_connected:
+                    self.renderer_connected = shown_reachable
+                    if shown_reachable:
                         logger.info(f"Renderer '{renderer.friendly_name}' is reachable again.")
                     else:
                         logger.warning(
-                            f"Renderer '{renderer.friendly_name}' stopped responding (offline or asleep): "
-                            f"{renderer.last_transport_error}"
+                            f"Renderer '{renderer.friendly_name}' stopped responding (offline or asleep) "
+                            f"after {self._consecutive_misses} missed polls: {renderer.last_transport_error}"
                         )
                     events.publish("renderer_status", {
-                        "connected": reachable,
+                        "connected": shown_reachable,
                         "friendly_name": renderer.friendly_name,
                         "host": renderer.host,
                     })
@@ -499,6 +533,13 @@ class AppState:
                     elif now - self._unreachable_since >= RENDERER_LOST_TIMEOUT_SECONDS:
                         self._declare_renderer_lost(renderer)
                         continue  # self.renderer has changed; re-read next iteration
+
+                if holding:
+                    # Skip this tick rather than publish an idle readout
+                    # ("Nothing playing", empty bar) for a renderer that's
+                    # probably still playing.
+                    time.sleep(TICK_INTERVAL_SECONDS)
+                    continue
 
                 events.publish("playback_tick", {
                     "connected": reachable,
@@ -540,6 +581,7 @@ class AppState:
             self.renderer = DLNARenderer()
             self.renderer_connected = False
             self._unreachable_since = None
+            self._consecutive_misses = 0
 
         # Same clean-slate reset as a fresh renderer selection -- see
         # select_renderer(). Queue contents survive; playback position
