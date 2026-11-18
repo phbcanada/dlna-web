@@ -878,7 +878,19 @@ class PlaybackSession:
         if result["should_stop"]:
             self.stop()
         elif result["advance_track"] is not None:
-            self._start_playback(result["advance_track"])
+            # current_idx is only the queue's cursor, not proof anything
+            # is playing: it's 0 right after tracks are added to an empty
+            # queue, and it stays put after Stop or the end of the queue.
+            # Deleting that row while idle used to start the next track.
+            # Ask the renderer, the same way toggle_play() does.
+            transport_state = self.renderer.get_transport_state()
+            if transport_state in ("PLAYING", "TRANSITIONING", "PAUSED_PLAYBACK"):
+                self._start_playback(result["advance_track"])
+            else:
+                logger.info(
+                    f"Removed the current queue entry while the renderer is "
+                    f"{transport_state} -- not starting the next track."
+                )
         return True
 
     # ------------------------------------------------------------------
