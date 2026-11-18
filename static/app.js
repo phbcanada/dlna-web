@@ -480,7 +480,7 @@ function clearBrowseSelection() {
   browseSelectedIndex = -1;
 }
 
-function selectBrowseRow(index) {
+function selectBrowseRow(index, scroll = true) {
   const rows = browseRows();
   if (rows.length === 0) {
     browseSelectedIndex = -1;
@@ -491,8 +491,22 @@ function selectBrowseRow(index) {
   browseSelectedIndex = index;
   const row = rows[index];
   row.classList.add("row-selected");
-  row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  if (scroll) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
+
+// Hover moves the same selection the keyboard uses, so there's only
+// ever one highlighted row and arrows carry on from wherever the mouse
+// left it. Listens for mousemove rather than mouseenter, and ignores
+// zero-movement events: when the keyboard scrolls the list under a
+// parked cursor, browsers can report the row now under the pointer as
+// hovered, and that mustn't steal the keyboard's selection.
+el("browse-list").addEventListener("mousemove", (e) => {
+  if (e.movementX === 0 && e.movementY === 0) return;
+  const row = e.target.closest(".row");
+  if (!row) return;
+  const index = browseRows().indexOf(row);
+  if (index !== -1 && index !== browseSelectedIndex) selectBrowseRow(index, false);
+});
 
 function restoreBrowseSelectionById(id) {
   const rows = browseRows();
