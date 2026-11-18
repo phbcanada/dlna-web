@@ -64,6 +64,17 @@ html, body {
 body {
   background-image:
     radial-gradient(ellipse at top, rgba(255,255,255,0.02), transparent 60%);
+  /* This is a control panel, not a document: Shift+click and drags on
+     rows otherwise select text, which looks like a multi-select the app
+     doesn't support. The console (log lines worth copying) and text
+     fields opt back in below. -webkit- prefix is still needed for
+     Safari, including iPad. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+.console-body, input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button {
@@ -398,8 +409,13 @@ input {
   border-color: var(--led-green);
 }
 
-.row.row-selected { background: var(--led-green-dim); }
-.row.row-selected .row-title { color: #d9ffe3; }
+/* The browse cursor (.row-selected) always exists so the keyboard has
+   something to act on, but it's only drawn while the keyboard is the
+   live input mode. In mouse mode it was just a leftover highlight from
+   some earlier keypress or the auto-select on folder entry, with no
+   meaning to someone clicking. */
+body.kbd-nav .row.row-selected { background: var(--led-green-dim); }
+body.kbd-nav .row.row-selected .row-title { color: #d9ffe3; }
 
 .breadcrumb {
   padding: 8px 14px;
@@ -438,27 +454,28 @@ input {
 /* Hover styling only exists at all while the mouse is the live input
    mode (not body.kbd-nav -- see setKeyboardNavMode() in app.js), and
    never on a row that's already meaningfully highlighted for another
-   reason: .row-selected (browse list's keyboard cursor) or .active
-   (queue panel's currently-playing track). Written this way instead of
+   reason: .active (queue panel's currently-playing track). The browse
+   cursor (.row-selected) is only drawn in kbd-nav mode, where hover is
+   off anyway, so it doesn't need excluding here. Written this way instead of
    as an override-on-top, so there's no specificity fight to lose --
    those rules below are the only thing that can ever style such a row,
    full stop, regardless of where the mouse happens to be sitting or
    which input mode is active. */
-body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) { background: var(--panel-alt); }
+body:not(.kbd-nav) .row:hover:not(.active) { background: var(--panel-alt); }
 
 .row-icon { width: 18px; text-align: center; color: var(--text-dim); flex-shrink: 0; }
 .row-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 /* Every row's title is clickable (folders navigate, files queue, queue
    rows play) -- one consistent hover affordance for all of them. Same
    gating as the background rule above, for the same reason. */
-body:not(.kbd-nav) .row:hover:not(.row-selected):not(.active) .row-title { color: var(--led-green); }
+body:not(.kbd-nav) .row:hover:not(.active) .row-title { color: var(--led-green); }
 
 .row.queue-row.active { background: var(--led-green-dim); }
 .row.queue-row.active .row-title { color: #d9ffe3; }
 /* Secondary text on the green highlight: --text-dim is nearly invisible
    against --led-green-dim (~2.3:1), so use a pale green instead (~5:1). */
 .row.queue-row.active :is(.row-index, .row-icon, .row-duration),
-.row.row-selected :is(.row-icon, .row-duration) { color: #a9d9b6; }
+body.kbd-nav .row.row-selected :is(.row-icon, .row-duration) { color: #a9d9b6; }
 .row-index { font-family: var(--font-mono); color: var(--text-dim); font-size: 11px; width: 20px; flex-shrink: 0; }
 /* Media server's res@duration. Never shrinks -- the title ellipsizes
    first. tabular-nums keeps the column's digits aligned row to row. */

@@ -698,7 +698,30 @@ el("add-folder-btn").addEventListener("click", async () => {
 // ---------------------------------------------------------------------
 // Queue panel
 // ---------------------------------------------------------------------
+// current_idx is the queue's cursor -- where Play will start -- and it
+// stays put after Stop or the end of the queue. So "this is the current
+// row" isn't the same as "this is playing": the highlight and the
+// play/pause icon follow the renderer's transport state from the tick,
+// and an idle queue shows no marker at all (matching "Nothing playing"
+// in the now-playing strip).
+let lastQueueSnapshot = null;
+let queueMarker = "idle"; // "playing" | "paused" | "idle"
+
+function queueMarkerFromTick(tick) {
+  if (!tick.connected) return "idle";
+  switch (tick.transport_state) {
+    case "PLAYING":
+    case "TRANSITIONING":
+      return "playing";
+    case "PAUSED_PLAYBACK":
+      return "paused";
+    default:
+      return "idle";
+  }
+}
+
 function renderQueue(snapshot) {
+  lastQueueSnapshot = snapshot;
   const list = el("queue-list");
   list.innerHTML = "";
   // Independent of whether the queue itself is empty, so this must run
@@ -709,12 +732,14 @@ function renderQueue(snapshot) {
     return;
   }
   let activeRow = null;
+  const markIdx = queueMarker === "idle" ? -1 : snapshot.current_idx;
+  const markIcon = queueMarker === "paused" ? "\u23F8" : "\u25B6";
   snapshot.queue.forEach((track, idx) => {
     const row = document.createElement("div");
-    row.className = "row queue-row" + (idx === snapshot.current_idx ? " active" : "");
+    row.className = "row queue-row" + (idx === markIdx ? " active" : "");
     row.innerHTML =
       `<span class="row-index"></span>` +
-      `<span class="row-icon">${idx === snapshot.current_idx ? "\u25B6" : "\u{1F3B5}"}</span>` +
+      `<span class="row-icon">${idx === markIdx ? markIcon : "\u{1F3B5}"}</span>` +
       `<span class="row-title"></span>` +
       `<span class="row-duration"></span>` +
       `<button class="row-add" title="Add to active playlist"${activePlaylistName ? "" : " disabled"}>\u2795</button>` +
@@ -732,7 +757,7 @@ function renderQueue(snapshot) {
       removeFromQueue(idx);
     });
     list.appendChild(row);
-    if (idx === snapshot.current_idx) {
+    if (idx === markIdx) {
       activeRow = row;
     }
   });
@@ -763,6 +788,9 @@ async function playAt(idx) {
     // instead of waiting on the SSE round-trip, so the highlight moves the
     // instant the click registers.
     const data = await apiPost("/api/queue/play_at", { index: idx });
+    // Assume it's playing so the highlight still moves on click; the
+    // next playback_tick corrects this within a second if it didn't.
+    queueMarker = "playing";
     renderQueue(data);
   } catch (e) {
     toast(`Could not play track: ${e.message}`, true);
@@ -939,6 +967,13 @@ function applyTick(tick) {
 
   const playing = tick.transport_state === "PLAYING" || tick.transport_state === "TRANSITIONING";
   el("playpause-btn").textContent = playing ? "\u23F8" : "\u25B6";
+
+  // Re-render only when the marker actually changes, not every second.
+  const marker = queueMarkerFromTick(tick);
+  if (marker !== queueMarker) {
+    queueMarker = marker;
+    if (lastQueueSnapshot) renderQueue(lastQueueSnapshot);
+  }
 
   setChip(
     "renderer",
