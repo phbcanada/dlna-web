@@ -542,6 +542,33 @@ function diveIntoBrowseSelection() {
   if (title) title.click();
 }
 
+function queueBrowseSelectionTrack() {
+  // 'q': queue the selected row only if it's a track. A folder row is a
+  // no-op rather than "queue this folder", the same way Right-arrow
+  // ignores track rows -- each key does one unambiguous thing.
+  const rows = browseRows();
+  if (browseSelectedIndex < 0 || browseSelectedIndex >= rows.length) return;
+  const row = rows[browseSelectedIndex];
+  if (row.classList.contains("folder")) return;
+  const title = row.querySelector(".row-title");
+  if (title) title.click(); // -> addToQueue()
+}
+
+function queueAllVisibleTracks() {
+  // 'Q': same as the Queue All button, and only when the listing shows
+  // more than one track (for a single track, 'q' is the key). Goes
+  // through the button so its disabled state -- including the
+  // server-enforced QUEUE_TRACK_LIMIT -- applies to the shortcut too.
+  const trackRows = browseRows().filter((r) => !r.classList.contains("folder"));
+  if (trackRows.length < 2) return;
+  const btn = el("add-folder-btn");
+  if (btn.disabled) {
+    if (btn.title) toast(btn.title, true);
+    return;
+  }
+  btn.click();
+}
+
 function clearBrowseSearch() {
   const input = el("browse-search");
   if (input) input.value = "";
@@ -648,6 +675,21 @@ document.addEventListener("keydown", (e) => {
     if (isTextInput && !isBrowseSearch) return;
     e.preventDefault();
     activateBrowseSelection();
+    return;
+  }
+
+  if (e.key === "q" || e.key === "Q") {
+    // Letters must type normally in any text field, the search box
+    // included, and Cmd/Ctrl/Alt+Q belong to the browser or OS.
+    // Ignoring auto-repeat stops a held key from queueing the same
+    // thing over and over.
+    if (isTextInput || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+    e.preventDefault();
+    if (e.key === "q") {
+      queueBrowseSelectionTrack();
+    } else {
+      queueAllVisibleTracks();
+    }
     return;
   }
 
